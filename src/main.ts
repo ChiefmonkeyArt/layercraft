@@ -1,0 +1,936 @@
+import './style.css';
+import type { Pt } from './geom';
+import { initGeom } from './geom';
+import type { EngineResult, Settings } from './engine';
+import { GENERATORS, defaultsFor, genById, randomParams, rng } from './generators';
+import { CUSTOM, PALETTES, VIEW, drawFree, palette, drawLayer, drawSketch, drawStack, drawTilted, screenToMm } from './render2d';
+import type { FreeArt } from './free';
+import { emptyFree, exampleFree, soften } from './free';
+import type { Stack3D } from './render3d';
+// Three.js is large; it is only loaded the first time full 3D is opened.
+let Stack3DClass: typeof Stack3D | null = null;
+let loading3d = false;
+import { MOTIFS } from './motifs';
+import { download, exportZip, layerSVG, parseSVG, planSheets, simplify } from './svgio';
+
+// ---------------- materials ----------------
+const MATERIALS: Record<string, { name: string; s: Partial<Settings> }> = {
+  birch: { name: 'Birch ply', s: { thickness: 3, rib: 1.8, minRib: 1.4, minOpening: 1.2, step: 2, kerf: 0.15, maxLayers: 12, regDia: 3, detailSpacing: 5 } },
+  oak: { name: 'Oak ply', s: { thickness: 3, rib: 1.8, minRib: 1.4, minOpening: 1.2, step: 2, kerf: 0.15, maxLayers: 12, regDia: 3, detailSpacing: 5 } },
+  paper: { name: 'Paper / card', s: { thickness: 0.4, rib: 1.2, minRib: 0.9, minOpening: 0.8, step: 1.2, kerf: 0.08, maxLayers: 24, regDia: 3, detailSpacing: 3 } },
+  custom: { name: 'Custom', s: {} },
+};
+
+const S: Settings = {
+  shape: 'rect', width: 300, height: 300, border: 14,
+  material: 'birch', thickness: 3, rib: 1.8, minRib: 1.4, minOpening: 1.2,
+  step: 2, stepCurve: 0, driftMode: 'in', drift: 0.6, lightAngle: -45, twist: 0,
+  maxLayers: 12, back: true,
+  kerf: 0.15, regHoles: true, regDia: 3, numbers: true,
+  bedW: 900, bedH: 600,
+  gen: 'bloom', seed: 1618, params: defaultsFor('bloom'),
+  spokes: 0, spokeTwist: 0, importMode: 'ribs',
+  detailMode: 'symmetric', detailStart: 2, detailEvery: 2, detailSpacing: 5, detailVariety: 0.75,
+  motifs: MOTIFS.map((m) => m.id),
+  repeat: 'centre', freeMirror: 'lr', flowEchoes: 4, flowSpacing: 4, scrollSize: 14, scrollGap: 22,
+  corners: false, cornerSize: 0.9, cornerRings: 3, cornerGap: 4.5, cornerCurl: 30, cornerBars: true,
+};
+// Free mode drawing: raw strokes per tool (mirroring is applied when the design is built)
+type Tool = 'outline' | 'flow' | 'scroll';
+const TOOL_KEY = { outline: 'outlines', flow: 'flows', scroll: 'scrolls' } as const;
+let free: FreeArt = emptyFree();
+const freeUndo: Tool[] = [];
+let tool: Tool = 'outline';
+let penSeen = false; // once a stylus is used, fingers pan and zoom instead of drawing
+const FREE_COL = { outline: '#7ad7ff', flow: '#ff7a3d', scroll: '#c99bff' };
+
+let sketch: Pt[][] = [];
+const sketchUndo: number[] = [];
+let imported: Pt[][] = [];
+let importName = '';
+let result: EngineResult | null = null;
+let colourway = 'custom';
+// colourway id passed to renderers; the custom one carries a version so cached 3D colours refresh
+const colourKey = () => (colourway === 'custom' ? `custom#${CUSTOM.version}` : colourway);
+let view: 'stack' | '3d' | 'layers' | 'sketch' = 'stack';
+let layerIdx = 0;
+let sym = 8, mirror = true;
+let projectName = 'Untitled stack';
+// Phones default to the WebGL-free 3D view; full WebGL 3D is one tap away.
+let simple3d = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 820;
+const tiltView = { rot: 0.45, tilt: 0.95, explode: 0, zoom: 1 };
+
+// ---------------- dom helpers ----------------
+const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector(sel) as T;
+function h(tag: string, attrs: Record<string, any> = {}, ...kids: (Node | string | null | undefined)[]) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, '');
+    else if (v !== false && v != null) el.setAttribute(k, String(v));
+  }
+  for (const c of kids) if (c != null) el.append(c);
+  return el;
+}
+
+const LOGO = `<svg viewBox="0 0 40 40" width="30" height="30" aria-label="Layercraft Stack" fill="none">
+  <rect x="3" y="3" width="34" height="34" rx="3" stroke="currentColor" stroke-width="2.2"/>
+  <rect x="9" y="8" width="24" height="24" rx="2.5" stroke="currentColor" stroke-width="2.2" opacity=".75"/>
+  <rect x="15" y="13" width="14" height="14" rx="2" stroke="currentColor" stroke-width="2.2" opacity=".5"/>
+  <rect x="20.5" y="18" width="5" height="5" rx="1" fill="var(--accent)"/>
+</svg>`;
+
+// ---------------- layout ----------------
+const app = $('#app');
+app.innerHTML = `
+<header class="top">
+  <div class="brand">${LOGO}<div><div class="name">Layercraft <span>Stack</span></div><div class="tag">Layered laser-cut art generator</div></div></div>
+  <input class="pname" id="pname" value="${projectName}" aria-label="Project name" spellcheck="false"/>
+  <div class="actions">
+    <button class="btn ghost" id="surprise" title="Random psychedelic design">Surprise me</button>
+    <button class="btn ghost" id="open">Open</button>
+    <button class="btn ghost" id="save">Save project</button>
+    <button class="btn primary" id="export">Export SVGs</button>
+    <input type="file" id="openfile" accept=".json,application/json" hidden />
+  </div>
+</header>
+<div class="body">
+  <aside class="panel" id="panel"></aside>
+  <main class="stage">
+    <nav class="tabs" role="tablist">
+      <button data-v="stack" class="on">Stack</button>
+      <button data-v="3d">3D</button>
+      <button data-v="layers">Layers</button>
+      <button data-v="sketch">Draw</button>
+      <div class="spacer"></div>
+      <div class="busy" id="busy"><i></i>Computing</div>
+    </nav>
+    <div class="viewport" id="viewport">
+      <canvas id="cv"></canvas>
+      <div id="three" class="three" hidden></div>
+      <div class="empty" id="empty" hidden></div>
+    </div>
+    <div class="toolbar" id="toolbar"></div>
+    <footer class="status">
+      <div class="stats" id="stats"></div>
+      <div class="warn" id="warn"></div>
+    </footer>
+  </main>
+</div>
+<div class="toast" id="toast"></div>`;
+
+const cv = $<HTMLCanvasElement>('#cv');
+const panel = $('#panel');
+const toolbar = $('#toolbar');
+let stack3d: Stack3D | null = null;
+
+function toast(msg: string) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('on');
+  clearTimeout((t as any)._h);
+  (t as any)._h = setTimeout(() => t.classList.remove('on'), 2600);
+}
+
+// ---------------- controls ----------------
+type Ctl = { el: HTMLElement; sync: () => void };
+const ctls: Ctl[] = [];
+
+function slider(label: string, get: () => number, set: (v: number) => void, min: number, max: number, step: number, unit = '', hint = '') {
+  const input = h('input', { type: 'range', min, max, step }) as HTMLInputElement;
+  const num = h('input', { type: 'number', min, max, step, class: 'num' }) as HTMLInputElement;
+  const row = h('label', { class: 'row', title: hint }, h('span', { class: 'lab' }, label), input, h('span', { class: 'numwrap' }, num, unit ? h('em', {}, unit) : null));
+  const sync = () => { input.value = String(get()); num.value = String(+get().toFixed(3)); };
+  input.addEventListener('input', () => { set(+input.value); num.value = input.value; schedule(); });
+  num.addEventListener('change', () => { const v = +num.value; if (isFinite(v)) { set(v); input.value = String(v); schedule(); } });
+  sync();
+  ctls.push({ el: row, sync });
+  return row;
+}
+
+function select(label: string, get: () => string, set: (v: string) => void, opts: [string, string][], after?: () => void) {
+  const sel = h('select', {}, ...opts.map(([v, t]) => h('option', { value: v }, t))) as HTMLSelectElement;
+  const row = h('label', { class: 'row sel' }, h('span', { class: 'lab' }, label), sel);
+  const sync = () => { sel.value = get(); };
+  sel.addEventListener('change', () => { set(sel.value); after?.(); schedule(); });
+  sync();
+  ctls.push({ el: row, sync });
+  return row;
+}
+
+function toggle(label: string, get: () => boolean, set: (v: boolean) => void) {
+  const cb = h('input', { type: 'checkbox' }) as HTMLInputElement;
+  const row = h('label', { class: 'row tog' }, h('span', { class: 'lab' }, label), h('span', { class: 'switch' }, cb, h('i')));
+  const sync = () => { cb.checked = get(); };
+  cb.addEventListener('change', () => { set(cb.checked); schedule(); });
+  sync();
+  ctls.push({ el: row, sync });
+  return row;
+}
+
+function section(title: string, open: boolean, ...kids: (Node | null)[]) {
+  const d = h('details', { class: 'sec', open }, h('summary', {}, title), h('div', { class: 'secbody' }, ...kids));
+  return d;
+}
+
+const genParamsHost = h('div', { class: 'genparams' });
+function buildGenParams() {
+  genParamsHost.innerHTML = '';
+  if (S.gen === 'none') { genParamsHost.append(h('p', { class: 'note' }, 'No generated pattern. Use Sketch or Import to draw the top layer.')); return; }
+  const g = genById(S.gen);
+  genParamsHost.append(h('p', { class: 'note' }, g.blurb));
+  for (const d of g.params) genParamsHost.append(slider(d.label, () => S.params[d.key] ?? d.def, (v) => (S.params[d.key] = v), d.min, d.max, d.step));
+}
+
+const importInfo = h('div', { class: 'note' });
+function updateImportInfo() {
+  importInfo.textContent = imported.length ? `${importName}: ${imported.length} path${imported.length > 1 ? 's' : ''} loaded.` : 'Import an SVG line drawing (e.g. from Inkscape). Lines become wooden ribs, or closed shapes become openings.';
+}
+
+function buildPanel() {
+  panel.innerHTML = '';
+  ctls.length = 0;
+  const seedRow = h('div', { class: 'row seedrow' },
+    h('span', { class: 'lab' }, 'Seed'),
+    (() => { const i = h('input', { type: 'number', class: 'num wide', value: S.seed }) as HTMLInputElement; i.addEventListener('change', () => { S.seed = +i.value | 0; schedule(); }); ctls.push({ el: i, sync: () => (i.value = String(S.seed)) }); return i; })(),
+    h('button', { class: 'btn small', onclick: () => { S.seed = (Math.random() * 1e6) | 0; syncAll(); schedule(); } }, 'Reroll'),
+  );
+  const fileIn = h('input', { type: 'file', accept: '.svg,image/svg+xml', hidden: true }) as HTMLInputElement;
+  fileIn.addEventListener('change', async () => {
+    const f = fileIn.files?.[0];
+    if (!f) return;
+    try {
+      const txt = await f.text();
+      const r = parseSVG(txt, S.width - 2 * S.border, S.height - 2 * S.border);
+      imported = r.lines; importName = f.name;
+      updateImportInfo(); schedule(); toast(`Imported ${r.count} paths from ${f.name}`);
+    } catch (e: any) { toast(e.message || 'Could not read that SVG'); }
+    fileIn.value = '';
+  });
+  updateImportInfo();
+
+  panel.append(
+    section('Pattern', true,
+      select('Repeat', () => S.repeat, (v) => setRepeat(v as any), [['centre', 'Centre — mandala'], ['free', 'Free — draw your own']]),
+      ...(S.repeat === 'free' ? freeControls() : [
+        select('Generator', () => S.gen, (v) => { S.gen = v; S.params = v === 'none' ? {} : defaultsFor(v); }, [...GENERATORS.map((g) => [g.id, g.name] as [string, string]), ['none', 'None (sketch / import only)']], buildGenParams),
+        seedRow,
+        genParamsHost,
+        slider('Extra spokes', () => S.spokes, (v) => (S.spokes = v), 0, 48, 1, '', 'Radial ribs that tie floating rings to the frame'),
+        slider('Spoke twist', () => S.spokeTwist, (v) => (S.spokeTwist = v), -3, 3, 0.05, 'rad'),
+      ]),
+    ),
+    section('Layer colours', true, colourPanel()),
+    section('Frame corners', false,
+      h('p', { class: 'note' }, S.shape === 'rect' ? 'Scrollwork in the four corners, like a carved frame. The main design stays inside the curved divider.' : 'Corner scrolls need the Rectangle outline.'),
+      toggle('Corner scrolls', () => S.corners, (v) => (S.corners = v)),
+      slider('Corner size', () => S.cornerSize, (v) => (S.cornerSize = v), 0, 1, 0.01, '', 'How far the corner scrollwork reaches in towards the middle'),
+      slider('Scroll ribs', () => S.cornerRings, (v) => (S.cornerRings = v), 0, 8, 1, 'each side', 'Parallel ribs either side of each scroll'),
+      slider('Rib spacing', () => S.cornerGap, (v) => (S.cornerGap = v), 2, 20, 0.1, 'mm'),
+      slider('Curl size', () => S.cornerCurl, (v) => (S.cornerCurl = v), 5, 80, 0.5, 'mm', 'Size of the spiral at the end of each scroll (limited by the space available)'),
+      toggle('Diagonal bars', () => S.cornerBars, (v) => (S.cornerBars = v)),
+    ),
+    section('Your own artwork', false,
+      importInfo,
+      h('div', { class: 'btnrow' },
+        h('button', { class: 'btn small', onclick: () => fileIn.click() }, 'Import SVG'),
+        h('button', { class: 'btn small ghost', onclick: () => { imported = []; importName = ''; updateImportInfo(); schedule(); } }, 'Clear import'),
+      ),
+      select('SVG means', () => S.importMode, (v) => (S.importMode = v as any), [['ribs', 'Lines are wooden ribs'], ['openings', 'Closed shapes are openings']]),
+      h('p', { class: 'note' }, 'Or open the Draw tab to draw with symmetry on top of any pattern.'),
+      fileIn,
+    ),
+    section('Material & size', true,
+      select('Material', () => S.material, (v) => { S.material = v; Object.assign(S, MATERIALS[v].s); syncAll(); }, Object.entries(MATERIALS).map(([k, m]) => [k, m.name])),
+      slider('Sheet thickness', () => S.thickness, (v) => (S.thickness = v), 0.1, 12, 0.05, 'mm'),
+      select('Outline', () => S.shape, (v) => (S.shape = v as any), [['rect', 'Rectangle'], ['circle', 'Circle'], ['hex', 'Hexagon']], buildPanel),
+      slider('Width', () => S.width, (v) => (S.width = v), 60, 1200, 1, 'mm'),
+      slider('Height', () => S.height, (v) => (S.height = v), 60, 1200, 1, 'mm'),
+      slider('Frame border', () => S.border, (v) => (S.border = v), 2, 60, 0.5, 'mm'),
+    ),
+    section('Layer rule', true,
+      h('p', { class: 'note' }, 'Every sheet is the sheet above with its openings shrunk by the step, then nudged by drift and twist.'),
+      slider('Step per layer', () => S.step, (v) => (S.step = v), 0.3, 10, 0.1, 'mm', 'How far each opening shrinks per sheet'),
+      slider('Step acceleration', () => S.stepCurve, (v) => (S.stepCurve = v), -0.3, 0.6, 0.01, '', 'Positive = deeper steps grow, a tunnel effect'),
+      select('Drift', () => S.driftMode, (v) => (S.driftMode = v as any), [['none', 'None — even terraces'], ['in', 'Toward centre'], ['out', 'Away from centre'], ['light', 'One direction (shading)']]),
+      slider('Drift amount', () => S.drift, (v) => (S.drift = v), 0, 2, 0.05, '× step'),
+      slider('Drift angle', () => S.lightAngle, (v) => (S.lightAngle = v), -180, 180, 1, '°', 'Direction for one-direction drift, and preview light'),
+      slider('Twist per layer', () => S.twist, (v) => (S.twist = v), -10, 10, 0.1, '°', 'Rotates each sheet’s openings for a spiral staircase'),
+      slider('Max layers', () => S.maxLayers, (v) => (S.maxLayers = v), 2, 60, 1, '', 'Stops early once every opening has closed'),
+      toggle('Solid back panel', () => S.back, (v) => (S.back = v)),
+    ),
+    section('Detail layers', true,
+      h('p', { class: 'note' }, 'Deeper sheets switch to a different fill inside each opening, so you get patterns within patterns rather than one shape echoed down.'),
+      select('Detail', () => S.detailMode, (v) => (S.detailMode = v as any), [['symmetric', 'Mixed, keeps symmetry'], ['same', 'One motif per level'], ['random', 'Mixed, every cell different'], ['off', 'Off — plain echoes']]),
+      slider('First detail at layer', () => S.detailStart, (v) => (S.detailStart = v), 1, 20, 1, '', 'How many plain echo layers before details begin'),
+      slider('New detail every', () => S.detailEvery, (v) => (S.detailEvery = v), 1, 10, 1, 'layers', 'Each new level nests another motif inside the last'),
+      slider('Detail spacing', () => S.detailSpacing, (v) => (S.detailSpacing = v), 2, 20, 0.1, 'mm', 'Gap between motif lines; shrinks a little each level'),
+      slider('Detail coverage', () => S.detailVariety, (v) => (S.detailVariety = v), 0, 1, 0.05, '', 'Share of openings that get a motif; the rest keep echoing'),
+      motifChips(),
+    ),
+    section('Fabrication', false,
+      slider('Rib width', () => S.rib, (v) => (S.rib = v), 0.4, 8, 0.05, 'mm', 'Width of the wooden lines on the top sheet'),
+      slider('Minimum rib', () => S.minRib, (v) => (S.minRib = v), 0.3, 5, 0.05, 'mm', 'Thinner material is flagged in red'),
+      slider('Minimum opening', () => S.minOpening, (v) => (S.minOpening = v), 0.2, 6, 0.05, 'mm', 'Slivers thinner than this are filled in'),
+      slider('Kerf', () => S.kerf, (v) => (S.kerf = v), 0, 0.6, 0.01, 'mm', 'Beam width. Exported cuts are offset by half of this'),
+      toggle('Alignment holes', () => S.regHoles, (v) => (S.regHoles = v)),
+      slider('Hole diameter', () => S.regDia, (v) => (S.regDia = v), 1, 10, 0.1, 'mm'),
+      toggle('Engrave layer numbers', () => S.numbers, (v) => (S.numbers = v)),
+      slider('Bed width', () => S.bedW, (v) => (S.bedW = v), 100, 2000, 1, 'mm'),
+      slider('Bed height', () => S.bedH, (v) => (S.bedH = v), 100, 2000, 1, 'mm'),
+    ),
+  );
+  buildGenParams();
+}
+
+// ---------------- layer colours ----------------
+// One panel: the gradient, then every sheet as a tappable swatch, then the detail sheets
+// listed with one-tap Gradient / Contrast / pick-a-colour choices.
+const colourHost = h('div', { class: 'colours' });
+let colourSig = '';
+function colourChanged() { CUSTOM.version++; colourSig = ''; refreshColours(); render(); }
+/** Live colour edit: repaint without rebuilding the panel, so the picker stays open. */
+function colourLive() { CUSTOM.version++; render(); }
+const nm = (id: string) => MOTIFS.find((m) => m.id === id)?.name ?? id;
+const toHex = (c: string) => { const x = document.createElement('canvas').getContext('2d')!; x.fillStyle = '#000'; x.fillStyle = c; return String(x.fillStyle); };
+/** Sheet colours as #rrggbb, top to bottom, for the swatches and the export. */
+function sheetColours(): string[] {
+  if (!result) return [];
+  const P = palette(colourKey()), n = result.layers.length;
+  return result.layers.map((_, i) => toHex(P.colour(i, n, S.material)));
+}
+function picker(get: () => string, onPick: (v: string) => void, label: string, cls = '') {
+  const i = h('input', { type: 'color', value: get(), 'aria-label': label, class: cls }) as HTMLInputElement;
+  i.addEventListener('input', () => { onPick(i.value); colourLive(); });
+  i.addEventListener('change', () => { onPick(i.value); colourLive(); });
+  (i as any)._get = get;
+  return i;
+}
+let swatchEls: { el: HTMLElement; inp: HTMLInputElement; i: number }[] = [];
+let detailEls: { layer: number; inp: HTMLInputElement; btns: HTMLButtonElement[] }[] = [];
+function openColours() {
+  const sec = colourHost.closest('details') as HTMLDetailsElement | null;
+  if (sec) { sec.open = true; panel.scrollTo({ top: sec.offsetTop - panel.offsetTop - 4, behavior: 'smooth' }); }
+}
+function updateSwatches() {
+  if (gbar) gbar.style.background = `linear-gradient(90deg, ${CUSTOM.top}, ${CUSTOM.bottom})`;
+  if (!result) return;
+  const cols = sheetColours();
+  const det = new Set((result.details ?? []).map((d) => d.layer));
+  for (const sw of swatchEls) {
+    const c = cols[sw.i] ?? '#000000';
+    sw.el.style.background = c;
+    sw.el.classList.toggle('det', det.has(sw.i + 1));
+    sw.el.classList.toggle('own', !!CUSTOM.sheet[sw.i + 1]);
+    if (document.activeElement !== sw.inp) sw.inp.value = c;
+  }
+  for (const d of detailEls) {
+    const o = CUSTOM.sheet[d.layer];
+    const mode = !o ? 'gradient' : o === 'contrast' ? 'contrast' : 'own';
+    d.btns.forEach((b) => b.classList.toggle('on', b.dataset.m === mode));
+    if (document.activeElement !== d.inp) d.inp.value = cols[d.layer - 1] ?? '#000000';
+  }
+}
+function colourPanel() { colourSig = ''; refreshColours(); return colourHost; }
+let gbar: HTMLElement | null = null;
+function refreshColours() {
+  const n = result?.layers.length ?? 0;
+  const det = result?.details ?? [];
+  // rebuild only when the layout changes, so a colour picker stays open while you drag it
+  const sig = JSON.stringify([colourway, n, det]);
+  if (sig === colourSig) { updateSwatches(); return; }
+  colourSig = sig;
+  colourHost.innerHTML = '';
+  swatchEls = []; detailEls = [];
+  const sel = h('select', {}, ...PALETTES.map((p) => h('option', { value: p.id }, p.name))) as HTMLSelectElement;
+  sel.value = colourway;
+  sel.addEventListener('change', () => { colourway = sel.value; colourChanged(); });
+  colourHost.append(h('label', { class: 'row sel' }, h('span', { class: 'lab' }, 'Colourway'), sel));
+  gbar = null;
+  if (colourway !== 'custom') {
+    colourHost.append(h('p', { class: 'note' }, 'To choose your own colours, including for detail sheets, pick “Your gradient”.'),
+      h('button', { class: 'btn small', onclick: () => { colourway = 'custom'; colourChanged(); } }, 'Use my own colours'));
+  } else {
+    colourHost.append(
+      h('div', { class: 'grad' },
+        h('label', { class: 'gend' }, picker(() => CUSTOM.top, (v) => (CUSTOM.top = v), 'Top sheet colour'), h('span', {}, 'Top')),
+        (gbar = h('span', { class: 'gbar' })),
+        h('label', { class: 'gend' }, picker(() => CUSTOM.bottom, (v) => (CUSTOM.bottom = v), 'Bottom sheet colour'), h('span', {}, 'Bottom')),
+        h('button', { class: 'btn small ghost', onclick: () => { [CUSTOM.top, CUSTOM.bottom] = [CUSTOM.bottom, CUSTOM.top]; colourChanged(); } }, 'Swap'),
+      ),
+    );
+  }
+  if (n) {
+    const strip = h('div', { class: 'swatches', 'aria-label': 'Sheet colours, top to bottom' });
+    for (let i = 0; i < n; i++) {
+      const isBack = result!.layers[i].isBack;
+      const inp = picker(() => sheetColours()[i], (v) => { CUSTOM.sheet[i + 1] = v; }, `${isBack ? 'Back panel' : `Sheet ${i + 1}`} colour`, 'swin');
+      const el = h('label', { class: 'sw', title: isBack ? 'Back panel' : `Sheet ${i + 1}` }, inp, h('b', {}, isBack ? 'B' : String(i + 1)));
+      if (colourway !== 'custom') inp.disabled = true;
+      strip.append(el);
+      swatchEls.push({ el, inp, i });
+    }
+    colourHost.append(h('div', { class: 'row col' },
+      h('span', { class: 'lab' }, colourway === 'custom' ? 'Sheets, top to bottom — tap one to change it' : 'Sheets, top to bottom'), strip,
+      h('div', { class: 'legend' }, h('i', { class: 'k det' }), 'detail sheet', h('i', { class: 'k own' }), 'your own colour')));
+  }
+  if (colourway === 'custom') {
+    colourHost.append(h('div', { class: 'subhead' }, 'Detail sheets'));
+    if (!det.length) colourHost.append(h('p', { class: 'note' }, 'This stack has no detail sheets yet. Turn on Detail layers to get them, then colour them here.'));
+    else {
+      colourHost.append(h('div', { class: 'btnrow' },
+        h('button', { class: 'btn small', onclick: () => { for (const d of det) CUSTOM.sheet[d.layer] = 'contrast'; colourChanged(); } }, 'Contrast all'),
+        h('button', { class: 'btn small ghost', onclick: () => { for (const d of det) delete CUSTOM.sheet[d.layer]; colourChanged(); } }, 'All follow gradient'),
+      ));
+      for (const d of det) {
+        const mk = (m: string, label: string, f: () => void) => { const b = h('button', { class: 'seg-b', 'data-m': m, onclick: () => { f(); colourLive(); } }, label) as HTMLButtonElement; return b; };
+        const btns = [
+          mk('gradient', 'Gradient', () => { delete CUSTOM.sheet[d.layer]; }),
+          mk('contrast', 'Contrast', () => { CUSTOM.sheet[d.layer] = 'contrast'; }),
+        ];
+        const inp = picker(() => sheetColours()[d.layer - 1], (v) => { CUSTOM.sheet[d.layer] = v; }, `Colour for detail sheet ${d.layer}`);
+        const own = h('label', { class: 'seg-b pick', 'data-m': 'own', title: 'Pick any colour' }, inp, h('span', {}, 'Pick')) as unknown as HTMLButtonElement;
+        btns.push(own);
+        colourHost.append(h('div', { class: 'drow' },
+          h('div', { class: 'dlab' }, h('b', {}, `Sheet ${d.layer}`), h('span', {}, d.motifs.map(nm).join(', '))),
+          h('div', { class: 'dseg' }, ...btns),
+        ));
+        detailEls.push({ layer: d.layer, inp, btns });
+      }
+    }
+    if (Object.keys(CUSTOM.sheet).length) colourHost.append(h('button', { class: 'btn small ghost', onclick: () => { CUSTOM.sheet = {}; colourChanged(); } }, 'Reset every sheet to the gradient'));
+  }
+  colourHost.append(h('p', { class: 'note' }, 'For coloured card, painted or stained layers. The cut files are the same either way; the export includes a colours list.'));
+  updateSwatches();
+}
+
+const MIRRORS: [string, string][] = [['off', 'Off'], ['lr', 'Left–right'], ['ud', 'Top–bottom'], ['quad', 'Four-way']];
+function freeControls(): Node[] {
+  return [
+    h('p', { class: 'note' }, 'Draw in the Draw tab. Outline cuts the window through the top sheet, Flow adds swirling bands that step down each layer, Scroll adds curling stems.'),
+    select('Mirror', () => S.freeMirror, (v) => (S.freeMirror = v as any), MIRRORS),
+    slider('Flow echoes', () => S.flowEchoes, (v) => (S.flowEchoes = v), 0, 12, 1, 'each side', 'Parallel ribs either side of every flow stroke'),
+    slider('Echo spacing', () => S.flowSpacing, (v) => (S.flowSpacing = v), 2, 20, 0.1, 'mm', 'Gap between the parallel flow ribs'),
+    slider('Scroll size', () => S.scrollSize, (v) => (S.scrollSize = v), 4, 60, 0.5, 'mm', 'Size of each curl on a scroll stem'),
+    slider('Scroll spacing', () => S.scrollGap, (v) => (S.scrollGap = v), 4, 120, 0.5, 'mm', 'Distance between curls along a stem'),
+    h('div', { class: 'btnrow' },
+      h('button', { class: 'btn small', onclick: () => showView('sketch') }, 'Open Draw tab'),
+      h('button', { class: 'btn small ghost', onclick: () => { free = exampleFree(S.width - 2 * S.border, S.height - 2 * S.border); freeUndo.length = 0; schedule(0); render(); } }, 'Load example'),
+      h('button', { class: 'btn small ghost', onclick: () => { free = emptyFree(); freeUndo.length = 0; schedule(0); render(); } }, 'Clear drawing'),
+    ),
+  ];
+}
+let softCache: { src: FreeArt; out: FreeArt } | null = null;
+/** Strokes as the engine sees them (smoothed), so the Draw view matches the cut. */
+function softArt(): FreeArt {
+  if (softCache?.src !== free) softCache = { src: free, out: { outlines: free.outlines.map((l) => soften(l, true)), flows: free.flows.map((l) => soften(l)), scrolls: free.scrolls.map((l) => soften(l)) } };
+  return softCache.out;
+}
+const freeEmpty = () => !free.outlines.length && !free.flows.length && !free.scrolls.length;
+function setRepeat(v: 'centre' | 'free') {
+  S.repeat = v;
+  if (v === 'free' && freeEmpty()) free = exampleFree(S.width - 2 * S.border, S.height - 2 * S.border);
+  buildPanel();
+  if (v === 'free') showView('sketch');
+}
+
+function motifChips() {
+  const wrap = h('div', { class: 'chips' });
+  const draw = () => {
+    wrap.innerHTML = '';
+    for (const m of MOTIFS) {
+      const on = S.motifs.includes(m.id);
+      wrap.append(h('button', { class: 'chip' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false', onclick: () => {
+        S.motifs = on ? S.motifs.filter((x) => x !== m.id) : [...S.motifs, m.id];
+        if (!S.motifs.length) S.motifs = [m.id];
+        draw(); schedule(120);
+      } }, m.name));
+    }
+  };
+  draw();
+  ctls.push({ el: wrap, sync: draw });
+  return h('div', { class: 'row col' }, h('span', { class: 'lab' }, 'Motifs'), wrap);
+}
+
+function syncAll() { ctls.forEach((c) => c.sync()); }
+
+// ---------------- worker ----------------
+import { Stale, computeAsync, pendingThinInput } from './engine';
+import { Pool } from './pool';
+import workerUrl from './worker.ts?worker&url';
+
+// The preview pane runs in a sandboxed (opaque-origin) iframe where `new Worker(url)` is
+// blocked. Try a direct worker, then a blob-URL worker, then fall back to the main thread.
+let worker: Worker | null = null;
+let pool: Pool | null = null;
+let reqId = 0, pending = false, timer = 0;
+let lastMsg = 0;
+function onResult(data: { id: number; result?: EngineResult; error?: string; partial?: EngineResult; thin?: { thin: EngineResult['thin']; warning: string } }) {
+  if (data.id !== reqId) return;
+  if (data.thin) {
+    if (result) { result = { ...result, thin: data.thin.thin, warnings: data.thin.warning ? [data.thin.warning, ...result.warnings] : result.warnings }; render(); }
+    return;
+  }
+  lastMsg = performance.now();
+  if (data.partial) {
+    // show the sheets computed so far while the rest are still being worked out
+    result = data.partial;
+    layerIdx = Math.min(layerIdx, result.layers.length - 1);
+    render();
+    return;
+  }
+  pending = false;
+  $('#busy').classList.remove('on');
+  if (data.error) { toast('Geometry error: ' + data.error); return; }
+  result = data.result!;
+  layerIdx = Math.min(layerIdx, result.layers.length - 1);
+  render();
+}
+// Build workers the same way the single worker is built: direct URL, else a blob copy.
+let blobUrl: string | null = null;
+async function workerFactory(): Promise<(() => Worker) | null> {
+  const direct = () => new Worker(new URL(workerUrl, import.meta.url));
+  try { direct().terminate(); return direct; } catch { /* sandboxed */ }
+  try {
+    const code = await (await fetch(new URL(workerUrl, import.meta.url))).text();
+    blobUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+    const u = blobUrl;
+    return () => new Worker(u);
+  } catch { return null; }
+}
+/** Use every spare core: a pool of workers, coordinated from this thread. */
+async function startPool() {
+  // iOS reports at most 2 cores to web pages; iPhones have 6 (2 fast + 4 efficiency)
+  const ios = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const hc = navigator.hardwareConcurrency || 4;
+  const n = ios && hc <= 2 ? 4 : Math.min(6, Math.max(2, hc - 1));
+  let make = await workerFactory();
+  if (!make) return;
+  pool = await Pool.create(make, n, forceJs);
+  if (!pool && !blobUrl) {
+    // a direct worker can construct but fail to load in sandboxed viewers; try the blob copy
+    try {
+      const code = await (await fetch(new URL(workerUrl, import.meta.url))).text();
+      blobUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+      const u = blobUrl;
+      make = () => new Worker(u);
+      pool = await Pool.create(make, n, forceJs);
+    } catch { /* no pool */ }
+  }
+}
+async function startWorker() {
+  const attach = (w: Worker) => { w.onmessage = (e) => { if (e.data.error && worker) { console.warn('worker error, using main thread:', e.data.error); worker.terminate(); worker = null; runRequest(reqId, lastInput); return; } onResult(e.data); }; w.onerror = (ev) => { console.warn('worker failed, using main thread:', (ev as ErrorEvent).message); worker = null; if (pending) runRequest(reqId, lastInput); }; return w; };
+  try { worker = attach(new Worker(new URL(workerUrl, import.meta.url))); return; } catch { /* sandboxed */ }
+  try {
+    const code = await (await fetch(new URL(workerUrl, import.meta.url))).text();
+    worker = attach(new Worker(URL.createObjectURL(new Blob([code], { type: 'text/javascript' }))));
+  } catch (err) { console.warn('no worker available:', err); worker = null; }
+}
+let lastInput: unknown = null;
+function runRequest(id: number, input: unknown) {
+  lastInput = input;
+  if (pool) {
+    const p = pool;
+    const stale = () => reqId !== id;
+    computeAsync(input as any, { runner: p.runner(stale), onProgress: (partial) => onResult({ id, partial }), deferThin: true, stale })
+      .then((res) => {
+        onResult({ id, result: res });
+        const t = pendingThinInput();
+        if (t) p.thin(t.top, t.minRib, stale).then((r) => { t.store(r.thin); onResult({ id, thin: r }); }).catch(() => {});
+      })
+      .catch((err) => {
+        if (err instanceof Stale) return;
+        console.warn('worker pool failed, using a single worker:', err);
+        p.terminate();
+        if (pool === p) pool = null;
+        if (reqId === id) runRequest(id, input);
+      });
+    return;
+  }
+  if (worker) {
+    worker.postMessage({ id, input, forceJs });
+    // watchdog: if the worker never answers, compute on the main thread instead
+    lastMsg = performance.now();
+    const watch = () => {
+      if (!(pending && reqId === id && worker)) return;
+      if (performance.now() - lastMsg > 45000) { worker.terminate(); worker = null; runRequest(id, input); }
+      else setTimeout(watch, 5000);
+    };
+    setTimeout(watch, 5000);
+    return;
+  }
+  setTimeout(async () => {
+    try { await initGeom(); onResult({ id, result: await computeAsync(input as any) }); }
+    catch (err: any) { onResult({ id, error: String(err?.message ?? err) }); }
+  }, 16);
+}
+function schedule(delay = 140) {
+  clearTimeout(timer);
+  timer = window.setTimeout(() => {
+    reqId++;
+    pending = true;
+    $('#busy').classList.add('on');
+    runRequest(reqId, { s: JSON.parse(JSON.stringify(S)), sketch, imported, free });
+  }, delay);
+}
+
+// ---------------- rendering ----------------
+function sizeCanvas() {
+  const vp = $('#viewport');
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = Math.max(10, vp.clientWidth * dpr);
+  cv.height = Math.max(10, vp.clientHeight * dpr);
+  cv.style.width = vp.clientWidth + 'px';
+  cv.style.height = vp.clientHeight + 'px';
+}
+
+const css = (v: string) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+let drawMs = 0;
+function render() {
+  const t = performance.now();
+  renderInner();
+  drawMs = performance.now() - t;
+  const dm = document.getElementById('drawms');
+  if (dm) dm.textContent = `draw ${drawMs.toFixed(0)} ms`;
+  try { updateZoomBtn(); } catch { /* gesture layer not set up yet */ }
+}
+function renderInner() {
+  sizeCanvas();
+  CUSTOM.detailLayers = result?.details?.map((d) => d.layer) ?? [];
+  refreshColours();
+  const three = $('#three');
+  const useGL = view === '3d' && !simple3d;
+  three.hidden = !useGL;
+  cv.hidden = useGL;
+  if (useGL) {
+    if (!Stack3DClass) {
+      if (!loading3d) {
+        loading3d = true;
+        import('./render3d').then((m) => { Stack3DClass = m.Stack3D; render(); })
+          .catch(() => { simple3d = true; toast('Full 3D could not load here, so Simple 3D is shown'); render(); })
+          .finally(() => { loading3d = false; });
+      }
+      return;
+    }
+    try {
+      if (!stack3d) {
+        stack3d = new Stack3DClass(three);
+        stack3d.onLost = () => { simple3d = true; stack3d?.stop(); toast('Full 3D was interrupted on this device, so Simple 3D is shown'); render(); };
+      }
+      stack3d.resize();
+      if (result) stack3d.build(result, S, colourKey());
+      stack3d.setExplode(tiltView.explode);
+      stack3d.start();
+    } catch {
+      simple3d = true;
+      stack3d = null;
+      three.innerHTML = '';
+      toast('This viewer cannot run full 3D, so Simple 3D is shown');
+      render();
+      return;
+    }
+  } else stack3d?.stop();
+  if (view === '3d' && simple3d && result) drawTilted(cv, result, S, colourKey(), tiltView);
+  if (result) {
+    if (view === 'stack') drawStack(cv, result, S, colourKey(), { light: S.lightAngle, showThin: true, isPaper: S.material === 'paper' });
+    if (view === 'layers') drawLayer(cv, result, S, layerIdx, { cut: css('--cut'), fill: css('--sheet'), ghost: css('--ghost'), island: css('--island'), bg: css('--bg') });
+  }
+  if (view === 'sketch' && S.repeat === 'free') drawFree(cv, result, S, softArt(), liveStroke ? [liveStroke] : [], tool, { fill: css('--sheet'), ...FREE_COL, guide: css('--ghost') });
+  else if (view === 'sketch') drawSketch(cv, result, S, sketch, liveStroke ? symCopies(liveStroke) : [], sym, mirror, { fill: css('--sheet'), stroke: css('--accent'), live: css('--accent-2'), guide: css('--ghost') });
+  renderToolbar();
+  renderStatus();
+}
+
+function renderStatus() {
+  const st = $('#stats'), w = $('#warn');
+  if (!result) { st.textContent = 'Generating…'; w.innerHTML = ''; return; }
+  const n = result.layers.length;
+  const cut = result.layers.reduce((a, l) => a + l.cutLength, 0) / 1000;
+  const plan = planSheets(result, S);
+  st.innerHTML = [
+    `<b>${n}</b> sheets`,
+    `<b>${(n * S.thickness).toFixed(1)}</b> mm deep`,
+    `<b>${result.openingsTop}</b> openings on top`,
+    `<b>${cut.toFixed(1)}</b> m of cutting`,
+    plan.fits ? `<b>${plan.sheets.length}</b> bed sheet${plan.sheets.length > 1 ? 's' : ''}` : `<span class="bad">Larger than bed</span>`,
+    `<span class="dim">compute ${result.ms.toFixed(0)} ms · <span id="drawms">draw ${drawMs.toFixed(0)} ms</span> · ${result.backend === 'js' ? 'JS engine' : result.backend === 'asmJsOnly' ? 'asm.js engine' : 'fast engine'}${pool ? ` · ${pool.size} cores` : worker ? '' : ' (main thread)'}</span>`,
+  ].map((x) => `<span>${x}</span>`).join('');
+  const nm = (id: string) => MOTIFS.find((m) => m.id === id)?.name ?? id;
+  if (result.details?.length) st.innerHTML += `<div class="details">Details: ${result.details.map((d) => `layer ${d.layer} — ${d.motifs.map(nm).join(', ')}`).join(' · ')}</div>`;
+  if (result.backend === 'js') st.innerHTML += `<div class="details">This device blocks the fast geometry engine (iPhone Lockdown Mode does this), so edits are slower. Excluding this app or site from Lockdown Mode makes it many times faster.</div>`;
+  if (!result.details?.length && S.detailMode !== 'off') st.innerHTML += `<div class="details">No detail layers in this stack — try a lower “First detail at layer” or wider spacing.</div>`;
+  w.innerHTML = result.warnings.map((x) => `<div>${x}</div>`).join('');
+}
+
+function renderToolbar() {
+  toolbar.innerHTML = '';
+  if (view === 'stack') {
+    toolbar.append(h('button', { class: 'btn small', onclick: openColours }, 'Colours'), h('span', { class: 'hint' }, 'Top-down render of the finished stack. Red marks material thinner than the minimum rib. Pinch or scroll to zoom, double-tap to reset.'));
+  } else if (view === '3d') {
+    const r = h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: tiltView.explode }) as HTMLInputElement;
+    r.addEventListener('input', () => { tiltView.explode = +r.value; if (simple3d) render(); else stack3d?.setExplode(+r.value); });
+    toolbar.append(
+      h('label', { class: 'inline' }, 'Explode', r),
+      h('button', { class: 'btn small ghost', onclick: () => { simple3d = !simple3d; render(); } }, simple3d ? 'Try full 3D' : 'Simple 3D'),
+      h('span', { class: 'hint' }, simple3d ? 'Drag to turn and tilt, pinch to zoom.' : 'Drag to orbit, pinch or scroll to zoom.'),
+    );
+  } else if (view === 'layers' && result) {
+    const n = result.layers.length;
+    const L = result.layers[layerIdx];
+    const r = h('input', { type: 'range', min: 0, max: n - 1, step: 1, value: layerIdx, class: 'grow' }) as HTMLInputElement;
+    r.addEventListener('input', () => { layerIdx = +r.value; render(); });
+    toolbar.append(
+      h('button', { class: 'btn small ghost', onclick: () => { layerIdx = Math.max(0, layerIdx - 1); render(); }, 'aria-label': 'Previous layer' }, '‹'),
+      r,
+      h('button', { class: 'btn small ghost', onclick: () => { layerIdx = Math.min(n - 1, layerIdx + 1); render(); }, 'aria-label': 'Next layer' }, '›'),
+      h('span', { class: 'lnum' }, L.isBack ? 'Back panel' : `Sheet ${layerIdx + 1} of ${n - (S.back ? 1 : 0)}`),
+      h('span', { class: 'hint' }, `${(L.cutLength / 1000).toFixed(2)} m cut${L.islands ? ` · ${L.islands} loose piece${L.islands > 1 ? 's' : ''} (amber)` : ''}`),
+      h('button', { class: 'btn small', onclick: async () => { await initGeom(forceJs); download(new Blob([layerSVG(result!, S, layerIdx)], { type: 'image/svg+xml' }), `${slug()}-${String(layerIdx + 1).padStart(2, '0')}.svg`); } }, 'Download this sheet'),
+    );
+  } else if (view === 'sketch' && S.repeat === 'free') {
+    const tb = (t: Tool, label: string) => h('button', { class: 'btn small tool' + (tool === t ? ' on' : ''), style: `--tc:${FREE_COL[t]}`, 'aria-pressed': tool === t ? 'true' : 'false', onclick: () => { tool = t; render(); } }, label);
+    const ms = h('select', { class: 'mini', 'aria-label': 'Mirror' }, ...MIRRORS.map(([v, t]) => h('option', { value: v }, t))) as HTMLSelectElement;
+    ms.value = S.freeMirror;
+    ms.addEventListener('change', () => { S.freeMirror = ms.value as any; syncAll(); schedule(0); render(); });
+    const n = free.outlines.length + free.flows.length + free.scrolls.length;
+    toolbar.append(
+      h('div', { class: 'seg' }, tb('outline', 'Outline'), tb('flow', 'Flow'), tb('scroll', 'Scroll')),
+      h('label', { class: 'inline' }, 'Mirror', ms),
+      h('button', { class: 'btn small ghost', onclick: () => { const t = freeUndo.pop(); if (t) { const k = TOOL_KEY[t]; free = { ...free, [k]: free[k].slice(0, -1) }; schedule(0); render(); } } }, 'Undo'),
+      h('button', { class: 'btn small ghost', onclick: () => { free = emptyFree(); freeUndo.length = 0; schedule(0); render(); } }, 'Clear'),
+      h('span', { class: 'hint' }, tool === 'outline' ? 'Draw a closed shape: it becomes the window cut through the top sheet.' : tool === 'flow' ? 'Draw a curve: it becomes a band of parallel ribs that steps down each layer.' : 'Draw a stem: curls sprout along it and at its tip.'),
+      h('span', { class: 'hint dim' }, `${n} stroke${n === 1 ? '' : 's'}${penSeen ? ' · pen draws, fingers pan and zoom' : ''}`),
+    );
+  } else if (view === 'sketch') {
+    const sr = h('input', { type: 'range', min: 1, max: 24, step: 1, value: sym }) as HTMLInputElement;
+    const sv = h('b', {}, String(sym));
+    sr.addEventListener('input', () => { sym = +sr.value; sv.textContent = String(sym); render(); });
+    const mb = h('input', { type: 'checkbox' }) as HTMLInputElement;
+    mb.checked = mirror;
+    mb.addEventListener('change', () => { mirror = mb.checked; });
+    toolbar.append(
+      h('label', { class: 'inline' }, 'Symmetry', sr, sv),
+      h('label', { class: 'inline' }, mb, 'Mirror'),
+      h('button', { class: 'btn small ghost', onclick: () => { const k = sketchUndo.pop(); if (k) { sketch = sketch.slice(0, sketch.length - k); schedule(0); } } }, 'Undo'),
+      h('button', { class: 'btn small ghost', onclick: () => { sketch = []; sketchUndo.length = 0; schedule(0); } }, 'Clear sketch'),
+      h('span', { class: 'hint' }, sketch.length ? `${sketchUndo.length} stroke${sketchUndo.length === 1 ? '' : 's'}` : 'Draw lines — each one becomes a rib, repeated around the centre.'),
+    );
+  }
+}
+
+// ---------------- sketch input ----------------
+let liveStroke: Pt[] | null = null;
+function symCopies(l: Pt[]): Pt[][] {
+  const out: Pt[][] = [];
+  for (let k = 0; k < sym; k++) {
+    const a = (k / sym) * Math.PI * 2, c = Math.cos(a), s = Math.sin(a);
+    out.push(l.map(([x, y]) => [x * c - y * s, x * s + y * c]));
+    if (mirror) out.push(l.map(([x, y]) => [x * c + y * s, x * s - y * c] as Pt).map(([x, y]) => [x, y]));
+  }
+  return out;
+}
+// ---------------- gestures: sketch, simple-3D orbit, pinch zoom & pan ----------------
+const ptrs = new Map<number, { x: number; y: number }>();
+let pinch: { d0: number; mx: number; my: number; z0: number; px0: number; py0: number } | null = null;
+let drag: { x: number; y: number } | null = null;
+let lastTap = 0;
+let raf = 0;
+const redraw = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; render(); updateZoomBtn(); }); };
+const local = (e: { clientX: number; clientY: number }) => {
+  const r = cv.getBoundingClientRect();
+  return { x: e.clientX - r.left - r.width / 2, y: e.clientY - r.top - r.height / 2 };
+};
+function zoomAt(mx: number, my: number, z: number) {
+  z = Math.min(10, Math.max(0.5, z));
+  // keep the point under the fingers / cursor fixed
+  VIEW.px = mx - ((mx - VIEW.px) * z) / VIEW.z;
+  VIEW.py = my - ((my - VIEW.py) * z) / VIEW.z;
+  VIEW.z = z;
+}
+function resetZoom() { VIEW.z = 1; VIEW.px = 0; VIEW.py = 0; redraw(); }
+const zoomBtn = h('button', { class: 'zoomreset', hidden: true, onclick: resetZoom, title: 'Reset zoom' }, 'Reset zoom');
+$('#viewport').append(zoomBtn);
+function updateZoomBtn() { zoomBtn.hidden = !(VIEW.z !== 1 || VIEW.px || VIEW.py) || (view === '3d' && !simple3d); }
+
+cv.addEventListener('pointerdown', (e) => {
+  cv.setPointerCapture(e.pointerId);
+  ptrs.set(e.pointerId, local(e));
+  if (ptrs.size === 2) {
+    // second finger: switch to pinch, abandon any stroke or orbit in progress
+    liveStroke = null; drag = null;
+    const [a, b] = [...ptrs.values()];
+    pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, z0: VIEW.z, px0: VIEW.px, py0: VIEW.py };
+    redraw();
+    return;
+  }
+  if (ptrs.size > 2) return;
+  const now = performance.now();
+  if (view !== 'sketch' && now - lastTap < 300) { resetZoom(); lastTap = 0; return; }
+  lastTap = now;
+  if (e.pointerType === 'pen') penSeen = true;
+  const drawing = view === 'sketch' && !(penSeen && e.pointerType === 'touch');
+  if (drawing) liveStroke = [screenToMm(cv, S, e.clientX, e.clientY)];
+  else drag = { x: e.clientX, y: e.clientY };
+});
+cv.addEventListener('pointermove', (e) => {
+  if (!ptrs.has(e.pointerId)) return;
+  ptrs.set(e.pointerId, local(e));
+  if (pinch && ptrs.size >= 2) {
+    const [a, b] = [...ptrs.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    VIEW.z = pinch.z0; VIEW.px = pinch.px0 + (mx - pinch.mx); VIEW.py = pinch.py0 + (my - pinch.my);
+    zoomAt(mx, my, pinch.z0 * (d / pinch.d0));
+    redraw();
+    return;
+  }
+  if (view === 'sketch' && liveStroke) {
+    const p = screenToMm(cv, S, e.clientX, e.clientY);
+    const q = liveStroke[liveStroke.length - 1];
+    if (Math.hypot(p[0] - q[0], p[1] - q[1]) > 0.4) { liveStroke.push(p); redraw(); }
+    return;
+  }
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag = { x: e.clientX, y: e.clientY };
+  if (view === '3d' && simple3d) {
+    tiltView.rot += dx * 0.01;
+    tiltView.tilt = Math.min(1.35, Math.max(0, tiltView.tilt - dy * 0.006));
+  } else if (VIEW.z > 1 || view === 'sketch') { VIEW.px += dx; VIEW.py += dy; } // pan when zoomed in, or with a finger while using a pen
+  else return;
+  redraw();
+});
+const endPtr = (e: PointerEvent) => {
+  ptrs.delete(e.pointerId);
+  if (ptrs.size < 2) pinch = null;
+  if (ptrs.size) return;
+  drag = null;
+  if (liveStroke) {
+    if (liveStroke.length > 1 && S.repeat === 'free') {
+      const k = TOOL_KEY[tool];
+      free = { ...free, [k]: [...free[k], simplify(liveStroke, 0.25)] };
+      freeUndo.push(tool);
+      schedule(0);
+    } else if (liveStroke.length > 1) {
+      const copies = symCopies(simplify(liveStroke, 0.25));
+      sketch = [...sketch, ...copies];
+      sketchUndo.push(copies.length);
+      schedule(0);
+    }
+    liveStroke = null;
+    render();
+  }
+};
+cv.addEventListener('pointerup', endPtr);
+cv.addEventListener('pointercancel', endPtr);
+cv.addEventListener('wheel', (e) => {
+  if (view === '3d' && !simple3d) return;
+  e.preventDefault();
+  const m = local(e);
+  zoomAt(m.x, m.y, VIEW.z * (e.deltaY > 0 ? 0.9 : 1.1));
+  redraw();
+}, { passive: false });
+
+// ---------------- tabs & actions ----------------
+function showView(v: typeof view) {
+  view = v;
+  document.querySelectorAll<HTMLButtonElement>('.tabs [data-v]').forEach((x) => x.classList.toggle('on', x.dataset.v === v));
+  cv.classList.toggle('draw', view === 'sketch');
+  render();
+}
+document.querySelectorAll<HTMLButtonElement>('.tabs [data-v]').forEach((b) => b.addEventListener('click', () => showView(b.dataset.v as any)));
+
+const slug = () => projectName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'stack';
+const projectData = () => ({ app: 'layercraft-stack', version: 2, name: projectName, settings: S, colourway, colours: { top: CUSTOM.top, bottom: CUSTOM.bottom, sheet: CUSTOM.sheet }, sketch, imported, importName, free });
+
+$('#pname').addEventListener('input', (e) => { projectName = (e.target as HTMLInputElement).value || 'Untitled stack'; });
+$('#save').addEventListener('click', () => download(new Blob([JSON.stringify(projectData())], { type: 'application/json' }), `${slug()}.layercraft.json`));
+$('#open').addEventListener('click', () => $('#openfile').click());
+$<HTMLInputElement>('#openfile').addEventListener('change', async (e) => {
+  const inp = e.target as HTMLInputElement;
+  const f = inp.files?.[0];
+  if (!f) return;
+  try {
+    const d = JSON.parse(await f.text());
+    Object.assign(S, { detailMode: 'off', repeat: 'centre', corners: false }, d.settings); // older projects had no detail layers or Free mode
+    free = d.free ?? emptyFree(); freeUndo.length = 0;
+    colourway = d.colourway ?? 'natural';
+    if (d.colours) { CUSTOM.top = d.colours.top ?? CUSTOM.top; CUSTOM.bottom = d.colours.bottom ?? CUSTOM.bottom; CUSTOM.sheet = { ...(d.colours.sheet ?? d.colours.detail ?? {}) }; }
+    colourChanged();
+    sketch = d.sketch ?? []; sketchUndo.length = 0; if (sketch.length) sketchUndo.push(sketch.length);
+    imported = d.imported ?? []; importName = d.importName ?? '';
+    projectName = d.name ?? 'Untitled stack';
+    $<HTMLInputElement>('#pname').value = projectName;
+    buildPanel(); schedule(0); toast(`Opened ${projectName}`);
+  } catch { toast('That file is not a Layercraft project'); }
+  inp.value = '';
+});
+
+$('#export').addEventListener('click', async () => {
+  if (!result || pending) { toast('Still computing — try again in a moment'); return; }
+  await initGeom(forceJs);
+  const prev = view;
+  if (view !== 'stack') { view = 'stack'; render(); }
+  const png = cv.toDataURL('image/png');
+  if (prev !== 'stack') { view = prev; render(); }
+  toast('Packing SVGs…');
+  const blob = await exportZip(result, S, projectData(), png, projectName, colourway === 'natural' ? undefined : sheetColours());
+  download(blob, `${slug()}-laser-svgs.zip`);
+  toast(`Exported ${result.layers.length} sheets`);
+});
+
+$('#surprise').addEventListener('click', () => {
+  const r = rng((Math.random() * 1e9) | 0);
+  const pick = <T,>(a: T[]) => a[Math.floor(r() * a.length)];
+  if (S.repeat === 'free') {
+    // keep your drawing; shake up how it is echoed and mirrored
+    if (freeEmpty()) free = exampleFree(S.width - 2 * S.border, S.height - 2 * S.border);
+    S.freeMirror = pick(['lr', 'lr', 'quad', 'ud', 'off'] as const);
+    S.flowEchoes = 2 + Math.floor(r() * 7);
+    S.flowSpacing = +((S.material === 'paper' ? 2.4 : 3.2) + r() * 3).toFixed(1);
+    S.scrollSize = +(8 + r() * 18).toFixed(1);
+    S.scrollGap = +(S.scrollSize * (1.2 + r())).toFixed(1);
+  } else {
+    S.gen = pick(GENERATORS).id;
+    S.params = randomParams(S.gen, r);
+  }
+  S.seed = (r() * 1e6) | 0;
+  S.driftMode = pick(['in', 'in', 'out', 'light', 'none'] as const);
+  S.drift = +(0.3 + r() * 0.9).toFixed(2);
+  S.twist = r() < 0.45 ? +((r() - 0.5) * 6).toFixed(1) : 0;
+  S.stepCurve = r() < 0.4 ? +(r() * 0.25).toFixed(2) : 0;
+  S.spokes = r() < 0.3 ? pick([6, 8, 12, 16, 24]) : 0;
+  S.spokeTwist = S.spokes ? +((r() - 0.5) * 3).toFixed(2) : 0;
+  S.detailMode = pick(['symmetric', 'symmetric', 'symmetric', 'same', 'random'] as const);
+  S.detailStart = 2 + Math.floor(r() * 3);
+  S.detailEvery = 2 + Math.floor(r() * 3);
+  S.detailVariety = +(0.55 + r() * 0.45).toFixed(2);
+  S.detailSpacing = +((S.material === 'paper' ? 2.4 : 4) + r() * 3).toFixed(1);
+  { const all = MOTIFS.map((m) => m.id).sort(() => r() - 0.5); S.motifs = all.slice(0, 3 + Math.floor(r() * 4)); }
+  if (r() < 0.6) {
+    // a fresh gradient: two hues far apart on the colour wheel
+    const h0 = r() * 360, h1 = h0 + 120 + r() * 120;
+    const hsl = (hh: number, l: number) => { const c = document.createElement('canvas').getContext('2d')!; c.fillStyle = `hsl(${hh % 360}, 85%, ${l}%)`; return String(c.fillStyle); };
+    colourway = 'custom'; CUSTOM.top = hsl(h0, 68); CUSTOM.bottom = hsl(h1, 24);
+  } else colourway = pick(PALETTES.filter((p) => p.id !== 'custom')).id;
+  colourChanged();
+  buildPanel();
+  syncAll();
+  schedule(0);
+  toast(S.repeat === 'free' ? `Free · ${MIRRORS.find((m) => m[0] === S.freeMirror)?.[1]} mirror · ${S.flowEchoes} echoes` : `${genById(S.gen).name} · seed ${S.seed}`);
+});
+
+let rz = 0;
+new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => render()); }).observe($('#viewport'));
+
+buildPanel();
+render();
+const forceJs = new URLSearchParams(location.search).has('js');
+// the coordinator needs geometry on this thread too (hashing, outlines)
+await initGeom(forceJs);
+if (!new URLSearchParams(location.search).has('single')) await startPool();
+if (!pool) await startWorker();
+schedule(0);
+// main-thread geometry is only needed for export (kerf offsets); load it in the background
+void initGeom(forceJs);
