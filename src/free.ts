@@ -4,7 +4,7 @@
 import type { Pt } from './geom';
 
 export interface FreeArt { outlines: Pt[][]; flows: Pt[][]; scrolls: Pt[][] }
-export type MirrorMode = 'off' | 'lr' | 'ud' | 'quad';
+export type MirrorMode = 'off' | 'lr' | 'ud' | 'quad' | 'rot2';
 export const emptyFree = (): FreeArt => ({ outlines: [], flows: [], scrolls: [] });
 
 export interface FreeSettings {
@@ -58,7 +58,7 @@ export function mirrorLines(lines: Pt[][], mode: MirrorMode): Pt[][] {
   const add = (fx: number, fy: number) => { for (const l of lines) out.push(l.map(([x, y]) => [x * fx, y * fy] as Pt)); };
   if (mode === 'lr' || mode === 'quad') add(-1, 1);
   if (mode === 'ud' || mode === 'quad') add(1, -1);
-  if (mode === 'quad') add(-1, -1);
+  if (mode === 'quad' || mode === 'rot2') add(-1, -1); // rot2: half-turn about the centre, (x,y) -> (-x,-y)
   return out;
 }
 

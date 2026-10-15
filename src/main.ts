@@ -405,11 +405,11 @@ function refreshColours() {
   updateSwatches();
 }
 
-const MIRRORS: [string, string][] = [['off', 'Off'], ['lr', 'Left–right'], ['ud', 'Top–bottom'], ['quad', 'Four-way']];
+const MIRRORS: [string, string][] = [['off', 'Off'], ['lr', 'Left–right'], ['ud', 'Top–bottom'], ['quad', 'Four-way'], ['rot2', 'Rotate 180°']];
 function freeControls(): Node[] {
   return [
     h('p', { class: 'note' }, 'Draw in the Draw tab. Outline cuts the window through the top sheet, Flow adds swirling bands that step down each layer, Scroll adds curling stems.'),
-    select('Mirror', () => S.freeMirror, (v) => (S.freeMirror = v as any), MIRRORS),
+    select('Symmetry', () => S.freeMirror, (v) => (S.freeMirror = v as any), MIRRORS),
     slider('Flow echoes', () => S.flowEchoes, (v) => (S.flowEchoes = v), 0, 12, 1, 'each side', 'Parallel ribs either side of every flow stroke'),
     slider('Echo spacing', () => S.flowSpacing, (v) => (S.flowSpacing = v), 2, 20, 0.1, 'mm', 'Gap between the parallel flow ribs'),
     slider('Scroll size', () => S.scrollSize, (v) => (S.scrollSize = v), 4, 60, 0.5, 'mm', 'Size of each curl on a scroll stem'),
@@ -691,13 +691,13 @@ function renderToolbar() {
     );
   } else if (view === 'sketch' && S.repeat === 'free') {
     const tb = (t: Tool, label: string) => h('button', { class: 'btn small tool' + (tool === t ? ' on' : ''), style: `--tc:${FREE_COL[t]}`, 'aria-pressed': tool === t ? 'true' : 'false', onclick: () => { tool = t; render(); } }, label);
-    const ms = h('select', { class: 'mini', 'aria-label': 'Mirror' }, ...MIRRORS.map(([v, t]) => h('option', { value: v }, t))) as HTMLSelectElement;
+    const ms = h('select', { class: 'mini', 'aria-label': 'Symmetry' }, ...MIRRORS.map(([v, t]) => h('option', { value: v }, t))) as HTMLSelectElement;
     ms.value = S.freeMirror;
     ms.addEventListener('change', () => { S.freeMirror = ms.value as any; syncAll(); schedule(0); render(); });
     const n = free.outlines.length + free.flows.length + free.scrolls.length;
     toolbar.append(
       h('div', { class: 'seg' }, tb('outline', 'Outline'), tb('flow', 'Flow'), tb('scroll', 'Scroll')),
-      h('label', { class: 'inline' }, 'Mirror', ms),
+      h('label', { class: 'inline' }, 'Symmetry', ms),
       h('button', { class: 'btn small ghost', onclick: () => { const t = freeUndo.pop(); if (t) { const k = TOOL_KEY[t]; free = { ...free, [k]: free[k].slice(0, -1) }; schedule(0); render(); } } }, 'Undo'),
       h('button', { class: 'btn small ghost', onclick: () => { free = emptyFree(); freeUndo.length = 0; schedule(0); render(); } }, 'Clear'),
       h('span', { class: 'hint' }, tool === 'outline' ? 'Draw a closed shape: it becomes the window cut through the top sheet.' : tool === 'flow' ? 'Draw a curve: it becomes a band of parallel ribs that steps down each layer.' : 'Draw a stem: curls sprout along it and at its tip.'),
@@ -886,7 +886,7 @@ $('#surprise').addEventListener('click', () => {
   if (S.repeat === 'free') {
     // keep your drawing; shake up how it is echoed and mirrored
     if (freeEmpty()) free = exampleFree(S.width - 2 * S.border, S.height - 2 * S.border);
-    S.freeMirror = pick(['lr', 'lr', 'quad', 'ud', 'off'] as const);
+    S.freeMirror = pick(['lr', 'lr', 'quad', 'ud', 'rot2', 'off'] as const);
     S.flowEchoes = 2 + Math.floor(r() * 7);
     S.flowSpacing = +((S.material === 'paper' ? 2.4 : 3.2) + r() * 3).toFixed(1);
     S.scrollSize = +(8 + r() * 18).toFixed(1);
@@ -918,7 +918,7 @@ $('#surprise').addEventListener('click', () => {
   buildPanel();
   syncAll();
   schedule(0);
-  toast(S.repeat === 'free' ? `Free · ${MIRRORS.find((m) => m[0] === S.freeMirror)?.[1]} mirror · ${S.flowEchoes} echoes` : `${genById(S.gen).name} · seed ${S.seed}`);
+  toast(S.repeat === 'free' ? `Free · ${MIRRORS.find((m) => m[0] === S.freeMirror)?.[1]} · ${S.flowEchoes} echoes` : `${genById(S.gen).name} · seed ${S.seed}`);
 });
 
 let rz = 0;

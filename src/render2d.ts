@@ -1,6 +1,7 @@
 import type { Group, Paths, Pt } from './geom';
 import { SCALE } from './geom';
 import type { EngineResult, Settings } from './engine';
+import { mirrorLines } from './free';
 
 export interface Palette { id: string; name: string; colour: (i: number, n: number, mat: string) => string }
 
@@ -315,16 +316,18 @@ export function drawFree(cv: HTMLCanvasElement, r: EngineResult | null, s: Setti
   const m = s.freeMirror;
   if (m === 'lr' || m === 'quad') { ctx.beginPath(); ctx.moveTo(0, -H); ctx.lineTo(0, H); ctx.stroke(); }
   if (m === 'ud' || m === 'quad') { ctx.beginPath(); ctx.moveTo(-W, 0); ctx.lineTo(W, 0); ctx.stroke(); }
+  if (m === 'rot2') {
+    // centre marker with a half-turn arrow so it's clear the drawing spins round the middle
+    const R = Math.min(W, H) * 0.12;
+    ctx.beginPath(); ctx.arc(0, 0, R, -Math.PI * 0.9, Math.PI * 0.05); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(0, 0, 3 * px, 0, Math.PI * 2); ctx.fillStyle = colours.guide; ctx.fill();
+    const ax = R * Math.cos(Math.PI * 0.05), ay = R * Math.sin(Math.PI * 0.05), k = 8 * px;
+    ctx.beginPath(); ctx.moveTo(ax - k, ay - k * 0.4); ctx.lineTo(ax, ay); ctx.lineTo(ax + k * 0.5, ay - k); ctx.stroke();
+  }
   ctx.setLineDash([]);
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-  const mirror = (ls: Pt[][]) => {
-    const out = [...ls];
-    const add = (fx: number, fy: number) => { for (const l of ls) out.push(l.map(([x, y]) => [x * fx, y * fy] as Pt)); };
-    if (m === 'lr' || m === 'quad') add(-1, 1);
-    if (m === 'ud' || m === 'quad') add(1, -1);
-    if (m === 'quad') add(-1, -1);
-    return out;
-  };
+  const mirror = (ls: Pt[][]) => mirrorLines(ls, m);
   const lines = (ls: Pt[][], col: string, w: number, dash: number[] = [], close = false) => {
     ctx.strokeStyle = col; ctx.lineWidth = w; ctx.setLineDash(dash);
     for (const l of ls) {
