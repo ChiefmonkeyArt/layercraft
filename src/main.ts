@@ -491,10 +491,13 @@ function autoCrop(im: HTMLImageElement): [number, number, number, number] {
   if (x1 - x0 < w * 0.2 || y1 - y0 < hh * 0.2) return [0, 0, im.naturalWidth, im.naturalHeight];
   return [x0 / sc, y0 / sc, (x1 - x0 + 1) / sc, (y1 - y0 + 1) / sc];
 }
+const MAX_IMAGE_BYTES = 30 * 1024 * 1024, MAX_IMAGE_PIXELS = 50e6, MAX_PROJECT_BYTES = 60 * 1024 * 1024;
 async function onTraceFile(f: File) {
   try {
+    if (f.size > MAX_IMAGE_BYTES) throw new Error('That picture is over 30 MB — save a smaller copy and try again');
     const url = await new Promise<string>((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.onerror = () => rej(new Error('Could not read that file')); r.readAsDataURL(f); });
     let im = await loadImg(url);
+    if (im.naturalWidth * im.naturalHeight > MAX_IMAGE_PIXELS) throw new Error('That picture is too large (over 50 megapixels) — resize it and try again');
     // keep a manageable copy (it is saved inside the project file)
     const long = Math.max(im.naturalWidth, im.naturalHeight);
     let src = url;
@@ -514,6 +517,7 @@ async function onTraceFile(f: File) {
 /** Pixels of the picture, fitted (cover) to the trace area at a working resolution. */
 async function traceImage(o: TraceOpts) {
   const im = traceImgEl ?? (traceImgEl = await loadImg(traceSrc));
+  if (im.naturalWidth * im.naturalHeight > MAX_IMAGE_PIXELS) throw new Error('too large');
   const long = Math.max(o.widthMm, o.heightMm);
   const px = Math.min(0.45, Math.max(0.16, long / 1300));
   const w = Math.max(32, Math.round(o.widthMm / px)), hh = Math.max(32, Math.round(o.heightMm / px));
@@ -1059,6 +1063,7 @@ $<HTMLInputElement>('#openfile').addEventListener('change', async (e) => {
   const inp = e.target as HTMLInputElement;
   const f = inp.files?.[0];
   if (!f) return;
+  if (f.size > MAX_PROJECT_BYTES) { toast('That project file is too large to open'); inp.value = ''; return; }
   try {
     const d = JSON.parse(await f.text());
     Object.assign(S, { detailMode: 'off', repeat: 'centre', corners: false, traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true }, d.settings); // older projects had no detail layers or Free mode
@@ -1070,7 +1075,8 @@ $<HTMLInputElement>('#openfile').addEventListener('change', async (e) => {
     imported = d.imported ?? []; importName = d.importName ?? '';
     traceSrc = d.trace?.src ?? ''; traceName = d.trace?.name ?? ''; traceCrop = d.trace?.crop ?? null;
     traceOrder = d.trace?.order ?? null; tracePalette = d.trace?.palette ?? null; traceRes = null; traceKey = ''; traceImgEl = null;
-    if (traceSrc && !/^data:image\/(png|jpeg|webp|gif);base64,/.test(traceSrc)) traceSrc = '';
+    if (traceSrc && (typeof traceSrc !== 'string' || traceSrc.length > MAX_IMAGE_BYTES * 1.4 || !/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(traceSrc))) traceSrc = '';
+    if (traceCrop && !(Array.isArray(traceCrop) && traceCrop.length === 4 && traceCrop.every((v) => typeof v === 'number' && isFinite(v)))) traceCrop = null;
     projectName = d.name ?? 'Untitled stack';
     $<HTMLInputElement>('#pname').value = projectName;
     buildPanel(); schedule(0); toast(`Opened ${projectName}`);
