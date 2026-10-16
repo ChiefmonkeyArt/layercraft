@@ -27,13 +27,16 @@ export interface Settings {
   detailStart: number; detailEvery: number; detailSpacing: number; detailVariety: number;
   motifs: string[];
   // repeat: centre = mandala generators; free = hand-drawn outlines, flows and scrolls
-  repeat: 'centre' | 'free';
+  repeat: 'centre' | 'free' | 'trace';
   freeMirror: MirrorMode; flowEchoes: number; flowSpacing: number; scrollSize: number; scrollGap: number;
   // frame corners: scrollwork in the corners of a rectangular panel
+  // trace: an uploaded image, one flat colour per sheet
+  traceColours: number; traceSmooth: number; traceMinPiece: number; traceDarkFirst: boolean;
   corners: boolean; cornerSize: number; cornerRings: number; cornerGap: number; cornerCurl: number; cornerBars: boolean;
 }
 
-export interface EngineInput { s: Settings; sketch: Pt[][]; imported: Pt[][]; free?: FreeArt }
+export interface TraceInput { sig: string; openings: Pt[][][] }
+export interface EngineInput { s: Settings; sketch: Pt[][]; imported: Pt[][]; free?: FreeArt; trace?: TraceInput | null }
 
 export interface LayerOut { material: Paths; groups: G.Group[]; islands: number; cutLength: number; isBack: boolean }
 export interface EngineResult {
@@ -257,7 +260,7 @@ export class Stale extends Error {}
 export const PERF = { wait: 0, jobs: 0 };
 
 export async function computeAsync(
-  { s, sketch, imported, free }: EngineInput,
+  { s, sketch, imported, free, trace }: EngineInput,
   opts: { runner?: Runner; onProgress?: (partial: EngineResult) => void; deferThin?: boolean; stale?: () => boolean } = {},
 ): Promise<EngineResult> {
   const runner = opts.runner ?? inlineRunner;
@@ -268,7 +271,7 @@ export async function computeAsync(
   const warnings: string[] = [];
   const baseS: Record<string, unknown> = { ...s };
   for (const k of DETAIL_KEYS) delete baseS[k];
-  const key = JSON.stringify([baseS, s.repeat === 'free' ? [] : sketch, imported, s.repeat === 'free' ? free : null]);
+  const key = s.repeat === 'trace' ? JSON.stringify([baseS, trace?.sig ?? '']) : JSON.stringify([baseS, s.repeat === 'free' ? [] : sketch, imported, s.repeat === 'free' ? free : null]);
   if (CACHE.key !== key || CACHE.memo.size > 40000) CACHE = newCache(key);
   const C = CACHE;
   const detailsOn = !!s.detailMode && s.detailMode !== 'off';
@@ -276,15 +279,6 @@ export async function computeAsync(
   const outerP = G.orient(G.toPath(outerShape(s)), true);
   const outer = [outerP];
 
-  if (!C.open0) {
-    const tw = performance.now();
-    const t = await runner.top({ s, sketch, imported, free });
-    PERF.wait += performance.now() - tw;
-    check();
-    if (CACHE !== C) throw new Stale('superseded');
-    C.open0 = t.open0; C.open0Y = t.open0Y;
-  }
-  const open0 = C.open0!;
 
   const reg: Pt[] = [];
   let regPaths: Paths = [];
@@ -305,6 +299,47 @@ export async function computeAsync(
     for (const g of groups) cut += G.perimeter([g.outer, ...g.holes]);
     return { material, groups: mg, islands: islands.length, cutLength: cut, isBack: false };
   };
+
+  if (s.repeat === 'trace') {
+    // traced image: each sheet's openings come straight from the tracer
+    const inner = G.offset(outer, -s.border);
+    const layers: LayerOut[] = [];
+    if (trace) trace.openings.forEach((rings, k) => {
+      const mk = `trace|${k}`;
+      let t = C.memo.get(mk) as unknown as ReturnType<typeof G.openingTree> | undefined;
+      if (!t) {
+        const op = G.inter(G.unionEvenOdd(rings.map((r) => G.toPath(r))), inner);
+        t = G.openingTree(op);
+        C.memo.set(mk, t as any);
+      }
+      layers.push(mkLayer(t.groups, t.islands, t.tops));
+    });
+    else warnings.push('Upload an image to trace: each flat colour becomes one sheet.');
+    layers.push({ material: [outerP, ...regPaths], groups: [{ outer: outerP, holes: regPaths }], islands: 0, cutLength: fixedCut, isBack: true });
+    let thin: Paths = [];
+    if (layers.length > 1) {
+      const top = layers[0].material;
+      C.top = top; C.minRib = s.minRib;
+      if (C.thin || !opts.deferThin) {
+        thin = C.thin ??= thinOf(top, s.minRib);
+        const w = thinWarning(thin, s.minRib);
+        if (w) warnings.push(w);
+      }
+    }
+    const isl = layers.reduce((a, l) => a + l.islands, 0);
+    if (isl) warnings.push(`${isl} loose piece${isl > 1 ? 's' : ''} across all sheets. Each one glues onto the solid sheet behind it, in the same place it was cut from.`);
+    return { layers, outer, reg, thin, warnings, ms: performance.now() - t0, openingsTop: layers[0]?.groups.length ?? 0, details: [], backend: G.geomBackend };
+  }
+
+  if (!C.open0) {
+    const tw = performance.now();
+    const t = await runner.top({ s, sketch, imported, free });
+    PERF.wait += performance.now() - tw;
+    check();
+    if (CACHE !== C) throw new Stale('superseded');
+    C.open0 = t.open0; C.open0Y = t.open0Y;
+  }
+  const open0 = C.open0!;
 
   const hashOf = (o: object, f: () => string) => { let h = C.hashes.get(o); if (!h) { h = f(); C.hashes.set(o, h); } return h; };
   const cellOf = (g: G.Group, h: string) => { let c = C.cells.get(h); if (!c) { c = cellInfo(g.outer, g.holes); C.cells.set(h, c); } return c; };

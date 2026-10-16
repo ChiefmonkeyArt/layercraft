@@ -11,6 +11,8 @@ import type { Stack3D } from './render3d';
 let Stack3DClass: typeof Stack3D | null = null;
 let loading3d = false;
 import { MOTIFS } from './motifs';
+import type { TraceOpts, TraceOut } from './trace';
+import { REDRAW_PROMPT, trace as traceNow } from './trace';
 import { download, exportZip, layerSVG, parseSVG, planSheets, simplify } from './svgio';
 
 // ---------------- materials ----------------
@@ -33,6 +35,7 @@ const S: Settings = {
   detailMode: 'symmetric', detailStart: 2, detailEvery: 2, detailSpacing: 5, detailVariety: 0.75,
   motifs: MOTIFS.map((m) => m.id),
   repeat: 'centre', freeMirror: 'lr', flowEchoes: 4, flowSpacing: 4, scrollSize: 14, scrollGap: 22,
+  traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true,
   corners: false, cornerSize: 0.9, cornerRings: 3, cornerGap: 4.5, cornerCurl: 30, cornerBars: true,
 };
 // Free mode drawing: raw strokes per tool (mirroring is applied when the design is built)
@@ -212,8 +215,8 @@ function buildPanel() {
 
   panel.append(
     section('Pattern', true,
-      select('Repeat', () => S.repeat, (v) => setRepeat(v as any), [['centre', 'Centre — mandala'], ['free', 'Free — draw your own']]),
-      ...(S.repeat === 'free' ? freeControls() : [
+      select('Repeat', () => S.repeat, (v) => setRepeat(v as any), [['centre', 'Centre — mandala'], ['free', 'Free — draw your own'], ['trace', 'Trace an image']]),
+      ...(S.repeat === 'trace' ? traceControls() : S.repeat === 'free' ? freeControls() : [
         select('Generator', () => S.gen, (v) => { S.gen = v; S.params = v === 'none' ? {} : defaultsFor(v); }, [...GENERATORS.map((g) => [g.id, g.name] as [string, string]), ['none', 'None (sketch / import only)']], buildGenParams),
         seedRow,
         genParamsHost,
@@ -428,11 +431,215 @@ function softArt(): FreeArt {
   return softCache.out;
 }
 const freeEmpty = () => !free.outlines.length && !free.flows.length && !free.scrolls.length;
-function setRepeat(v: 'centre' | 'free') {
+function setRepeat(v: 'centre' | 'free' | 'trace') {
   S.repeat = v;
   if (v === 'free' && freeEmpty()) free = exampleFree(S.width - 2 * S.border, S.height - 2 * S.border);
+  if (v === 'trace') { S.back = true; if (traceRes) applyTraceColours(); }
   buildPanel();
   if (v === 'free') showView('sketch');
+  else if (view === 'sketch') showView('stack');
+}
+
+// ---------------- trace an image ----------------
+// Upload a flat-colour picture; every colour becomes one sheet at its own depth.
+let traceSrc = '';               // the picture, as a data URL (kept in the project file)
+let traceName = '';
+let traceCrop: [number, number, number, number] | null = null; // artwork bounding box in the picture (px)
+let traceRes: TraceOut | null = null;
+let traceKey = '', traceRunKey = '';
+let traceOrder: number[] | null = null;   // your own colour order (palette indices)
+let tracePalette: string[] | null = null; // colours kept steady between re-traces
+let traceMsg = 'No image yet.';
+let traceImgEl: HTMLImageElement | null = null;
+const traceStatus = h('p', { class: 'note tstatus', 'aria-live': 'polite' });
+const traceList = h('div', { class: 'tlist' });
+function setTraceMsg(m: string) { traceMsg = m; traceStatus.textContent = m; }
+
+function traceArea() {
+  const b = S.border;
+  if (S.shape === 'circle') { const d = Math.min(S.width, S.height) - 2 * b; return [d, d]; }
+  if (S.shape === 'hex') { const r = Math.min(S.width / 2, S.height / 2 / (Math.sqrt(3) / 2)); return [2 * r - 2 * b, Math.sqrt(3) * r - 2 * b]; }
+  return [S.width - 2 * b, S.height - 2 * b];
+}
+function traceOpts(): TraceOpts {
+  const [wm, hm] = traceArea();
+  return { colours: S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening,
+    widthMm: wm, heightMm: hm, shape: S.shape, darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined };
+}
+const traceKeyOf = (o: TraceOpts) => JSON.stringify([o, traceSrc.length, traceSrc.slice(-64), traceCrop]);
+
+function loadImg(src: string): Promise<HTMLImageElement> {
+  return new Promise((res, rej) => { const im = new Image(); im.crossOrigin = 'anonymous'; im.onload = () => res(im); im.onerror = () => rej(new Error('Could not read that image')); im.src = src; });
+}
+/** Box around the artwork: everything that differs from the colour in the corners. */
+function autoCrop(im: HTMLImageElement): [number, number, number, number] {
+  const sc = Math.min(1, 400 / Math.max(im.naturalWidth, im.naturalHeight));
+  const w = Math.max(1, Math.round(im.naturalWidth * sc)), hh = Math.max(1, Math.round(im.naturalHeight * sc));
+  const c = document.createElement('canvas'); c.width = w; c.height = hh;
+  const x = c.getContext('2d')!; x.drawImage(im, 0, 0, w, hh);
+  let d: Uint8ClampedArray;
+  try { d = x.getImageData(0, 0, w, hh).data; } catch { return [0, 0, im.naturalWidth, im.naturalHeight]; }
+  const at = (px: number, py: number) => { const i = (py * w + px) * 4; return [d[i], d[i + 1], d[i + 2], d[i + 3]]; };
+  const corners = [at(1, 1), at(w - 2, 1), at(1, hh - 2), at(w - 2, hh - 2)];
+  const bg = [0, 1, 2].map((k) => corners.map((q) => q[k]).sort((a, b) => a - b)[1]);
+  let x0 = w, y0 = hh, x1 = -1, y1 = -1;
+  for (let py = 0; py < hh; py++) for (let px = 0; px < w; px++) {
+    const q = at(px, py);
+    if (q[3] < 20) continue;
+    if (Math.abs(q[0] - bg[0]) + Math.abs(q[1] - bg[1]) + Math.abs(q[2] - bg[2]) > 60) { if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py; }
+  }
+  if (x1 - x0 < w * 0.2 || y1 - y0 < hh * 0.2) return [0, 0, im.naturalWidth, im.naturalHeight];
+  return [x0 / sc, y0 / sc, (x1 - x0 + 1) / sc, (y1 - y0 + 1) / sc];
+}
+async function onTraceFile(f: File) {
+  try {
+    const url = await new Promise<string>((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.onerror = () => rej(new Error('Could not read that file')); r.readAsDataURL(f); });
+    let im = await loadImg(url);
+    // keep a manageable copy (it is saved inside the project file)
+    const long = Math.max(im.naturalWidth, im.naturalHeight);
+    let src = url;
+    if (long > 2048) {
+      const sc = 2048 / long, c = document.createElement('canvas');
+      c.width = Math.round(im.naturalWidth * sc); c.height = Math.round(im.naturalHeight * sc);
+      c.getContext('2d')!.drawImage(im, 0, 0, c.width, c.height);
+      try { src = c.toDataURL('image/png'); im = await loadImg(src); } catch { /* keep the original */ }
+    }
+    traceSrc = src; traceName = f.name; traceImgEl = im;
+    traceCrop = autoCrop(im);
+    traceOrder = null; tracePalette = null; traceRes = null; traceKey = '';
+    if (S.repeat !== 'trace') setRepeat('trace'); else buildPanel();
+    schedule(0);
+  } catch (e: any) { toast(e.message || 'Could not read that image'); }
+}
+/** Pixels of the picture, fitted (cover) to the trace area at a working resolution. */
+async function traceImage(o: TraceOpts) {
+  const im = traceImgEl ?? (traceImgEl = await loadImg(traceSrc));
+  const long = Math.max(o.widthMm, o.heightMm);
+  const px = Math.min(0.45, Math.max(0.16, long / 1300));
+  const w = Math.max(32, Math.round(o.widthMm / px)), hh = Math.max(32, Math.round(o.heightMm / px));
+  const c = document.createElement('canvas'); c.width = w; c.height = hh;
+  const x = c.getContext('2d')!;
+  const [cx, cy, cw, ch] = traceCrop ?? [0, 0, im.naturalWidth, im.naturalHeight];
+  const sc = Math.max(w / cw, hh / ch);
+  const dw = cw * sc, dh = ch * sc;
+  x.imageSmoothingQuality = 'high';
+  x.drawImage(im, cx, cy, cw, ch, (w - dw) / 2, (hh - dh) / 2, dw, dh);
+  const d = x.getImageData(0, 0, w, hh); // throws if the browser blocks reading the picture
+  return { w, h: hh, data: d.data };
+}
+let traceWorker: Worker | null | undefined;
+let traceJob = 0, traceBusy = false, traceTimer = 0;
+async function runTrace() {
+  if (!traceSrc) return;
+  const o = traceOpts(), key = traceKeyOf(o);
+  traceRunKey = key;
+  const job = ++traceJob;
+  traceBusy = true;
+  setTraceMsg('Tracing…');
+  $('#busy').classList.add('on');
+  let img: { w: number; h: number; data: Uint8ClampedArray };
+  try { img = await traceImage(o); } catch (e: any) { traceBusy = false; setTraceMsg('This browser would not let the app read the picture. Try another image file.'); return; }
+  const t0 = performance.now();
+  const done = (out: TraceOut) => {
+    if (job !== traceJob) return;
+    traceBusy = false;
+    traceRes = out;
+    tracePalette = out.palette;
+    traceKey = traceKeyOf(traceOpts());
+    applyTraceColours();
+    const glue = out.pieces.reduce((a, b) => a + b, 0);
+    setTraceMsg(`${out.order.length} sheets from ${out.order.length} colours · ${glue} glue-in piece${glue === 1 ? '' : 's'} · ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+    drawTraceList();
+    schedule(0);
+  };
+  const fail = (msg: string) => { if (job !== traceJob) return; traceBusy = false; setTraceMsg('Trace failed: ' + msg); $('#busy').classList.remove('on'); };
+  const inline = () => setTimeout(() => { try { done(traceNow(img, o, (m) => setTraceMsg(m))); } catch (e: any) { fail(String(e?.message ?? e)); } }, 30);
+  if (traceWorker === undefined || traceWorker) {
+    // a newer trace replaces a running one
+    if (traceWorker) traceWorker.terminate();
+    try { const make = await workerFactory(); traceWorker = make ? make() : null; } catch { traceWorker = null; }
+  }
+  if (!traceWorker) { inline(); return; }
+  const w = traceWorker;
+  w.onmessage = (e) => {
+    const m = e.data;
+    if (m.traceJob !== job) return;
+    if (m.progress) { setTraceMsg(m.progress); return; }
+    if (m.error) { fail(m.error); return; }
+    done(m.out);
+  };
+  w.onerror = () => { if (traceWorker === w) traceWorker = null; inline(); };
+  w.postMessage({ traceJob: job, img, opts: o }, [img.data.buffer]);
+}
+/** Re-trace when anything the trace depends on has changed (called from schedule). */
+function traceFresh(): boolean {
+  if (S.repeat !== 'trace' || !traceSrc) return true;
+  const key = traceKeyOf(traceOpts());
+  if (key === traceKey) return true;
+  if (key !== traceRunKey || !traceBusy) { clearTimeout(traceTimer); traceTimer = window.setTimeout(runTrace, 250); traceRunKey = key; }
+  return false;
+}
+function applyTraceColours() {
+  if (!traceRes) return;
+  colourway = 'custom';
+  CUSTOM.sheet = {};
+  traceRes.order.forEach((c, d) => { CUSTOM.sheet[d + 1] = traceRes!.palette[c]; });
+  colourChanged();
+}
+function moveTrace(d: number, by: number) {
+  if (!traceRes) return;
+  const o = traceRes.order.slice();
+  const j = d + by;
+  if (j < 0 || j >= o.length) return;
+  [o[d], o[j]] = [o[j], o[d]];
+  traceOrder = o; tracePalette = traceRes.palette;
+  schedule(0);
+}
+function drawTraceList() {
+  traceList.innerHTML = '';
+  if (!traceRes) return;
+  const { order, palette: pal, share, pieces } = traceRes;
+  order.forEach((c, d) => {
+    const last = d === order.length - 1;
+    traceList.append(h('div', { class: 'trow' },
+      h('i', { class: 'tsw', style: `background:${pal[c]}` }),
+      h('span', { class: 'tname' }, h('b', {}, last ? 'Back' : `Sheet ${d + 1}`), ` ${share[c]}%`, !last && pieces[d] ? h('em', {}, ` · ${pieces[d]} glue-in`) : null),
+      h('button', { class: 'btn tiny ghost', 'aria-label': `Move ${last ? 'back panel' : 'sheet ' + (d + 1)} colour up`, disabled: d === 0, onclick: () => moveTrace(d, -1) }, '↑'),
+      h('button', { class: 'btn tiny ghost', 'aria-label': `Move ${last ? 'back panel' : 'sheet ' + (d + 1)} colour down`, disabled: last, onclick: () => moveTrace(d, 1) }, '↓'),
+    ));
+  });
+}
+function traceControls(): Node[] {
+  const fileIn = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif', hidden: true }) as HTMLInputElement;
+  fileIn.addEventListener('change', () => { const f = fileIn.files?.[0]; if (f) void onTraceFile(f); fileIn.value = ''; });
+  const thumb = traceSrc
+    ? h('img', { class: 'tthumb', src: traceSrc, alt: traceName ? `Traced image: ${traceName}` : 'Traced image' })
+    : h('button', { class: 'tthumb empty', onclick: () => fileIn.click() }, 'Choose a picture');
+  const copy = async () => {
+    const txt = REDRAW_PROMPT(S.traceColours);
+    try { await navigator.clipboard.writeText(txt); toast('Prompt copied. Paste it into Gemini (Nano Banana Pro) with your picture.'); }
+    catch { toast('Copy blocked here — select the prompt text below instead'); }
+  };
+  setTraceMsg(traceSrc ? traceMsg : 'No image yet.');
+  drawTraceList();
+  return [
+    h('p', { class: 'note' }, 'Each flat colour in the picture becomes one sheet. The darkest colour is the top face; the deepest is the solid back.'),
+    h('div', { class: 'tbox' }, thumb, h('div', { class: 'btncol' },
+      h('button', { class: 'btn small', onclick: () => fileIn.click() }, traceSrc ? 'Change picture' : 'Upload picture'),
+      h('button', { class: 'btn small ghost', onclick: copy }, 'Copy AI redraw prompt'),
+    )),
+    traceStatus,
+    h('details', { class: 'tprompt' }, h('summary', {}, 'Photo or shaded art? Redraw it first'),
+      h('p', { class: 'note' }, 'Shading and texture trace badly. Open Gemini, choose Nano Banana Pro (the image model), attach your picture and paste this prompt. Then upload the result here.'),
+      h('textarea', { class: 'ptext', readonly: true, rows: 6 }, REDRAW_PROMPT(S.traceColours))),
+    slider('Colours (sheets)', () => S.traceColours, (v) => { S.traceColours = v; traceOrder = null; tracePalette = null; }, 3, 16, 1, '', 'How many flat colours to find; each one is a sheet'),
+    slider('Smoothness', () => S.traceSmooth, (v) => (S.traceSmooth = v), 0, 2, 0.05, 'mm', 'Rounds every edge into flowing curves; higher loses fine detail'),
+    slider('Smallest loose piece', () => S.traceMinPiece, (v) => (S.traceMinPiece = v), 2, 200, 1, 'mm²', 'Loose pieces smaller than this blend into the colour around them'),
+    toggle('Darkest colour on top', () => S.traceDarkFirst, (v) => { S.traceDarkFirst = v; traceOrder = null; }),
+    h('div', { class: 'row col' }, h('span', { class: 'lab' }, 'Layer order, top to bottom'), traceList,
+      h('button', { class: 'btn small ghost', onclick: () => { traceOrder = null; schedule(0); } }, 'Auto order (fewest loose pieces)')),
+    fileIn,
+  ];
 }
 
 function motifChips() {
@@ -571,7 +778,9 @@ function schedule(delay = 140) {
     reqId++;
     pending = true;
     $('#busy').classList.add('on');
-    runRequest(reqId, { s: JSON.parse(JSON.stringify(S)), sketch, imported, free });
+    if (!traceFresh()) { pending = false; return; } // the trace finishes first, then schedules again
+    const tr = S.repeat === 'trace' && traceRes ? { sig: traceKey, openings: traceRes.openings } : null;
+    runRequest(reqId, { s: JSON.parse(JSON.stringify(S)), sketch, imported, free, trace: tr });
   }, delay);
 }
 
@@ -842,7 +1051,7 @@ function showView(v: typeof view) {
 document.querySelectorAll<HTMLButtonElement>('.tabs [data-v]').forEach((b) => b.addEventListener('click', () => showView(b.dataset.v as any)));
 
 const slug = () => projectName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'stack';
-const projectData = () => ({ app: 'layercraft-stack', version: 2, name: projectName, settings: S, colourway, colours: { top: CUSTOM.top, bottom: CUSTOM.bottom, sheet: CUSTOM.sheet }, sketch, imported, importName, free });
+const projectData = () => ({ app: 'layercraft-stack', version: 2, name: projectName, settings: S, colourway, colours: { top: CUSTOM.top, bottom: CUSTOM.bottom, sheet: CUSTOM.sheet }, sketch, imported, importName, free, trace: traceSrc ? { src: traceSrc, name: traceName, crop: traceCrop, order: traceOrder, palette: tracePalette } : null });
 
 $('#pname').addEventListener('input', (e) => { projectName = (e.target as HTMLInputElement).value || 'Untitled stack'; });
 $('#save').addEventListener('click', () => download(new Blob([JSON.stringify(projectData())], { type: 'application/json' }), `${slug()}.layercraft.json`));
@@ -853,13 +1062,16 @@ $<HTMLInputElement>('#openfile').addEventListener('change', async (e) => {
   if (!f) return;
   try {
     const d = JSON.parse(await f.text());
-    Object.assign(S, { detailMode: 'off', repeat: 'centre', corners: false }, d.settings); // older projects had no detail layers or Free mode
+    Object.assign(S, { detailMode: 'off', repeat: 'centre', corners: false, traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true }, d.settings); // older projects had no detail layers or Free mode
     free = d.free ?? emptyFree(); freeUndo.length = 0;
     colourway = d.colourway ?? 'natural';
     if (d.colours) { CUSTOM.top = d.colours.top ?? CUSTOM.top; CUSTOM.bottom = d.colours.bottom ?? CUSTOM.bottom; CUSTOM.sheet = { ...(d.colours.sheet ?? d.colours.detail ?? {}) }; }
     colourChanged();
     sketch = d.sketch ?? []; sketchUndo.length = 0; if (sketch.length) sketchUndo.push(sketch.length);
     imported = d.imported ?? []; importName = d.importName ?? '';
+    traceSrc = d.trace?.src ?? ''; traceName = d.trace?.name ?? ''; traceCrop = d.trace?.crop ?? null;
+    traceOrder = d.trace?.order ?? null; tracePalette = d.trace?.palette ?? null; traceRes = null; traceKey = ''; traceImgEl = null;
+    if (traceSrc && !/^data:image\/(png|jpeg|webp|gif);base64,/.test(traceSrc)) traceSrc = '';
     projectName = d.name ?? 'Untitled stack';
     $<HTMLInputElement>('#pname').value = projectName;
     buildPanel(); schedule(0); toast(`Opened ${projectName}`);
@@ -881,6 +1093,7 @@ $('#export').addEventListener('click', async () => {
 });
 
 $('#surprise').addEventListener('click', () => {
+  if (S.repeat === 'trace') { toast('Surprise me works on the Centre and Free patterns — switch Repeat to try it'); return; }
   const r = rng((Math.random() * 1e9) | 0);
   const pick = <T,>(a: T[]) => a[Math.floor(r() * a.length)];
   if (S.repeat === 'free') {

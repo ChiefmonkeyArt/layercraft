@@ -2,6 +2,7 @@
 //  - single mode: { id, input } computes a whole design here
 //  - pool mode:   { job, kind, ... } runs one batch of work units for a coordinator
 import { initGeom, geomBackend } from './geom';
+import { trace } from './trace';
 import { Stale, computeAsync, pendingThin, stepNode, thinCheck, topCut, topLayer, topRibs, topTidy } from './engine';
 let ready: Promise<unknown> | null = null;
 let latest = 0;
@@ -10,6 +11,12 @@ const post = (m: unknown) => (self as any).postMessage(m);
 
 self.onmessage = async (e: MessageEvent<any>) => {
   const m = e.data;
+  if (m.traceJob !== undefined) {
+    // image tracing needs no geometry library
+    try { post({ traceJob: m.traceJob, out: trace(m.img, m.opts, (msg) => post({ traceJob: m.traceJob, progress: msg })) }); }
+    catch (err: any) { post({ traceJob: m.traceJob, error: String(err?.message ?? err) }); }
+    return;
+  }
   await (ready ??= initGeom(!!m.forceJs));
   if (m.job !== undefined) {
     try {

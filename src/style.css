@@ -179,3 +179,20 @@ input[type=color]::-webkit-color-swatch { border: none; border-radius: 4px; }
 .colours .seg-b + .seg-b { border-left: 1px solid var(--line); }
 .colours .seg-b.on { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text); }
 .colours .seg-b.pick input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; border: none; padding: 0; }
+
+/* trace an image */
+.tbox { display: flex; gap: 12px; align-items: center; }
+.tthumb { width: 92px; height: 92px; object-fit: contain; border-radius: var(--radius); border: 1px solid var(--line); background: var(--bg); flex: none; }
+.tthumb.empty { color: var(--muted); font-size: var(--text-xs); font-weight: 600; cursor: pointer; padding: 8px; }
+.btncol { display: flex; flex-direction: column; gap: 6px; align-items: stretch; min-width: 0; }
+.tstatus { color: var(--text); }
+.tprompt summary { cursor: pointer; font-size: var(--text-xs); font-weight: 600; color: var(--muted); padding: 2px 0; }
+.tprompt[open] summary { margin-bottom: 6px; }
+.ptext { width: 100%; margin-top: 6px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: var(--text-xs); line-height: 1.45; resize: vertical; }
+.tlist { display: flex; flex-direction: column; gap: 3px; margin: 2px 0 6px; }
+.trow { display: grid; grid-template-columns: 18px 1fr auto auto; gap: 8px; align-items: center; font-size: var(--text-xs); }
+.tsw { width: 18px; height: 18px; border-radius: 4px; border: 1px solid rgba(255,255,255,.18); }
+.tname b { font-weight: 600; }
+.tname em { color: var(--muted); font-style: normal; }
+.btn.tiny { padding: 2px 8px; font-size: var(--text-xs); line-height: 1.2; }
+.btn:disabled { opacity: .35; cursor: default; }
