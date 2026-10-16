@@ -213,7 +213,7 @@ function buildPanel() {
   });
   updateImportInfo();
 
-  panel.append(
+  panel.append(...[
     section('Pattern', true,
       select('Repeat', () => S.repeat, (v) => setRepeat(v as any), [['centre', 'Centre — mandala'], ['free', 'Free — draw your own'], ['trace', 'Trace an image']]),
       ...(S.repeat === 'trace' ? traceControls() : S.repeat === 'free' ? freeControls() : [
@@ -225,7 +225,7 @@ function buildPanel() {
       ]),
     ),
     section('Layer colours', true, colourPanel()),
-    section('Frame corners', false,
+    S.repeat === 'trace' ? null : section('Frame corners', false,
       h('p', { class: 'note' }, S.shape === 'rect' ? 'Scrollwork in the four corners, like a carved frame. The main design stays inside the curved divider.' : 'Corner scrolls need the Rectangle outline.'),
       toggle('Corner scrolls', () => S.corners, (v) => (S.corners = v)),
       slider('Corner size', () => S.cornerSize, (v) => (S.cornerSize = v), 0, 1, 0.01, '', 'How far the corner scrollwork reaches in towards the middle'),
@@ -234,7 +234,7 @@ function buildPanel() {
       slider('Curl size', () => S.cornerCurl, (v) => (S.cornerCurl = v), 5, 80, 0.5, 'mm', 'Size of the spiral at the end of each scroll (limited by the space available)'),
       toggle('Diagonal bars', () => S.cornerBars, (v) => (S.cornerBars = v)),
     ),
-    section('Your own artwork', false,
+    S.repeat === 'trace' ? null : section('Your own artwork', false,
       importInfo,
       h('div', { class: 'btnrow' },
         h('button', { class: 'btn small', onclick: () => fileIn.click() }, 'Import SVG'),
@@ -252,7 +252,7 @@ function buildPanel() {
       slider('Height', () => S.height, (v) => (S.height = v), 60, 1200, 1, 'mm'),
       slider('Frame border', () => S.border, (v) => (S.border = v), 2, 60, 0.5, 'mm'),
     ),
-    section('Layer rule', true,
+    S.repeat === 'trace' ? null : section('Layer rule', true,
       h('p', { class: 'note' }, 'Every sheet is the sheet above with its openings shrunk by the step, then nudged by drift and twist.'),
       slider('Step per layer', () => S.step, (v) => (S.step = v), 0.3, 10, 0.1, 'mm', 'How far each opening shrinks per sheet'),
       slider('Step acceleration', () => S.stepCurve, (v) => (S.stepCurve = v), -0.3, 0.6, 0.01, '', 'Positive = deeper steps grow, a tunnel effect'),
@@ -263,7 +263,7 @@ function buildPanel() {
       slider('Max layers', () => S.maxLayers, (v) => (S.maxLayers = v), 2, 60, 1, '', 'Stops early once every opening has closed'),
       toggle('Solid back panel', () => S.back, (v) => (S.back = v)),
     ),
-    section('Detail layers', true,
+    S.repeat === 'trace' ? null : section('Detail layers', true,
       h('p', { class: 'note' }, 'Deeper sheets switch to a different fill inside each opening, so you get patterns within patterns rather than one shape echoed down.'),
       select('Detail', () => S.detailMode, (v) => (S.detailMode = v as any), [['symmetric', 'Mixed, keeps symmetry'], ['same', 'One motif per level'], ['random', 'Mixed, every cell different'], ['off', 'Off — plain echoes']]),
       slider('First detail at layer', () => S.detailStart, (v) => (S.detailStart = v), 1, 20, 1, '', 'How many plain echo layers before details begin'),
@@ -283,7 +283,7 @@ function buildPanel() {
       slider('Bed width', () => S.bedW, (v) => (S.bedW = v), 100, 2000, 1, 'mm'),
       slider('Bed height', () => S.bedH, (v) => (S.bedH = v), 100, 2000, 1, 'mm'),
     ),
-  );
+  ].filter((x): x is HTMLElement => !!x));
   buildGenParams();
 }
 
@@ -378,7 +378,7 @@ function refreshColours() {
       h('span', { class: 'lab' }, colourway === 'custom' ? 'Sheets, top to bottom — tap one to change it' : 'Sheets, top to bottom'), strip,
       h('div', { class: 'legend' }, h('i', { class: 'k det' }), 'detail sheet', h('i', { class: 'k own' }), 'your own colour')));
   }
-  if (colourway === 'custom') {
+  if (colourway === 'custom' && S.repeat !== 'trace') {
     colourHost.append(h('div', { class: 'subhead' }, 'Detail sheets'));
     if (!det.length) colourHost.append(h('p', { class: 'note' }, 'This stack has no detail sheets yet. Turn on Detail layers to get them, then colour them here.'));
     else {
@@ -498,8 +498,8 @@ async function onTraceFile(f: File) {
     // keep a manageable copy (it is saved inside the project file)
     const long = Math.max(im.naturalWidth, im.naturalHeight);
     let src = url;
-    if (long > 2048) {
-      const sc = 2048 / long, c = document.createElement('canvas');
+    if (long > 1600) {
+      const sc = 1600 / long, c = document.createElement('canvas');
       c.width = Math.round(im.naturalWidth * sc); c.height = Math.round(im.naturalHeight * sc);
       c.getContext('2d')!.drawImage(im, 0, 0, c.width, c.height);
       try { src = c.toDataURL('image/png'); im = await loadImg(src); } catch { /* keep the original */ }
@@ -547,8 +547,7 @@ async function runTrace() {
     tracePalette = out.palette;
     traceKey = traceKeyOf(traceOpts());
     applyTraceColours();
-    const glue = out.pieces.reduce((a, b) => a + b, 0);
-    setTraceMsg(`${out.order.length} sheets from ${out.order.length} colours · ${glue} glue-in piece${glue === 1 ? '' : 's'} · ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+    setTraceMsg(`Traced ${out.order.length} colours into ${out.order.length} sheets in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
     drawTraceList();
     schedule(0);
   };
@@ -861,7 +860,7 @@ function renderStatus() {
   st.innerHTML = [
     `<b>${n}</b> sheets`,
     `<b>${(n * S.thickness).toFixed(1)}</b> mm deep`,
-    `<b>${result.openingsTop}</b> openings on top`,
+    S.repeat === 'trace' ? `<b>${result.layers.length}</b> colours` : `<b>${result.openingsTop}</b> openings on top`,
     `<b>${cut.toFixed(1)}</b> m of cutting`,
     plan.fits ? `<b>${plan.sheets.length}</b> bed sheet${plan.sheets.length > 1 ? 's' : ''}` : `<span class="bad">Larger than bed</span>`,
     `<span class="dim">compute ${result.ms.toFixed(0)} ms · <span id="drawms">draw ${drawMs.toFixed(0)} ms</span> · ${result.backend === 'js' ? 'JS engine' : result.backend === 'asmJsOnly' ? 'asm.js engine' : 'fast engine'}${pool ? ` · ${pool.size} cores` : worker ? '' : ' (main thread)'}</span>`,
@@ -869,7 +868,7 @@ function renderStatus() {
   const nm = (id: string) => MOTIFS.find((m) => m.id === id)?.name ?? id;
   if (result.details?.length) st.innerHTML += `<div class="details">Details: ${result.details.map((d) => `layer ${d.layer} — ${d.motifs.map(nm).join(', ')}`).join(' · ')}</div>`;
   if (result.backend === 'js') st.innerHTML += `<div class="details">This device blocks the fast geometry engine (iPhone Lockdown Mode does this), so edits are slower. Excluding this app or site from Lockdown Mode makes it many times faster.</div>`;
-  if (!result.details?.length && S.detailMode !== 'off') st.innerHTML += `<div class="details">No detail layers in this stack — try a lower “First detail at layer” or wider spacing.</div>`;
+  if (!result.details?.length && S.detailMode !== 'off' && S.repeat !== 'trace') st.innerHTML += `<div class="details">No detail layers in this stack — try a lower “First detail at layer” or wider spacing.</div>`;
   w.innerHTML = result.warnings.map((x) => `<div>${x}</div>`).join('');
 }
 
