@@ -14,6 +14,7 @@ import { MOTIFS } from './motifs';
 import type { TraceOpts, TraceOut } from './trace';
 import { REDRAW_PROMPT, trace as traceNow } from './trace';
 import { download, exportZip, layerSVG, parseSVG, planSheets, simplify } from './svgio';
+import { createGuided } from './guided';
 
 // ---------------- materials ----------------
 const MATERIALS: Record<string, { name: string; s: Partial<Settings> }> = {
@@ -56,6 +57,8 @@ let colourway = 'custom';
 // colourway id passed to renderers; the custom one carries a version so cached 3D colours refresh
 const colourKey = () => (colourway === 'custom' ? `custom#${CUSTOM.version}` : colourway);
 let view: 'stack' | '3d' | 'layers' | 'sketch' = 'stack';
+let guided: ReturnType<typeof createGuided> | null = null;
+let guidedOn = false;
 let layerIdx = 0;
 let sym = 8, mirror = true;
 let projectName = 'Untitled stack';
@@ -90,6 +93,7 @@ app.innerHTML = `
 <header class="top">
   <div class="brand">${LOGO}<div><div class="name">Layercraft <span>Stack</span></div><div class="tag">Layered laser-cut art generator</div></div></div>
   <input class="pname" id="pname" value="${projectName}" aria-label="Project name" spellcheck="false"/>
+  <button class="btn ghost modebtn" id="mode" aria-pressed="false">Advanced</button>
   <div class="actions">
     <button class="btn ghost" id="surprise" title="Random psychedelic design">Surprise me</button>
     <button class="btn ghost" id="open">Open</button>
@@ -101,6 +105,7 @@ app.innerHTML = `
 <div class="body">
   <aside class="panel" id="panel"></aside>
   <main class="stage">
+    <div id="gbarhost"></div>
     <nav class="tabs" role="tablist">
       <button data-v="stack" class="on">Stack</button>
       <button data-v="3d">3D</button>
@@ -285,6 +290,7 @@ function buildPanel() {
     ),
   ].filter((x): x is HTMLElement => !!x));
   buildGenParams();
+  if (guidedOn) guided?.refresh();
 }
 
 // ---------------- layer colours ----------------
@@ -512,6 +518,7 @@ async function onTraceFile(f: File) {
     traceOrder = null; tracePalette = null; traceRes = null; traceKey = '';
     if (S.repeat !== 'trace') setRepeat('trace'); else buildPanel();
     schedule(0);
+    guided?.pictureChosen();
   } catch (e: any) { toast(e.message || 'Could not read that image'); }
 }
 /** Pixels of the picture, fitted (cover) to the trace area at a working resolution. */
@@ -554,6 +561,7 @@ async function runTrace() {
     setTraceMsg(`Traced ${out.order.length} colours into ${out.order.length} sheets in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
     drawTraceList();
     schedule(0);
+    guided?.traced();
   };
   const fail = (msg: string) => { if (job !== traceJob) return; traceBusy = false; setTraceMsg('Trace failed: ' + msg); $('#busy').classList.remove('on'); };
   const inline = () => setTimeout(() => { try { done(traceNow(img, o, (m) => setTraceMsg(m))); } catch (e: any) { fail(String(e?.message ?? e)); } }, 30);
@@ -696,6 +704,7 @@ function onResult(data: { id: number; result?: EngineResult; error?: string; par
   result = data.result!;
   layerIdx = Math.min(layerIdx, result.layers.length - 1);
   render();
+  guided?.computed();
 }
 // Build workers the same way the single worker is built: direct URL, else a blob copy.
 let blobUrl: string | null = null;
@@ -1142,7 +1151,53 @@ $('#surprise').addEventListener('click', () => {
 let rz = 0;
 new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => render()); }).observe($('#viewport'));
 
-buildPanel();
+// ---------------- guided mode (the default) ----------------
+const gFile = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif', hidden: true }) as HTMLInputElement;
+gFile.addEventListener('change', () => { const f = gFile.files?.[0]; if (f) void onTraceFile(f); gFile.value = ''; });
+document.body.append(gFile);
+async function loadDemo() {
+  try {
+    const r = await fetch('./demo/daruma.webp');
+    if (!r.ok) throw new Error('demo missing');
+    const f = new File([await r.blob()], 'trippy-daruma.webp', { type: 'image/webp' });
+    Object.assign(S, MATERIALS.birch.s, { material: 'birch', shape: 'rect', width: 300, height: 400, border: 8,
+      traceColours: 7, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, back: true });
+    projectName = 'Trippy Daruma'; $<HTMLInputElement>('#pname').value = projectName;
+    syncAll();
+    await onTraceFile(f);
+  } catch { toast('Could not load the demo picture'); }
+}
+guided = createGuided({
+  S, h, toast,
+  hasPicture: () => !!traceSrc && S.repeat === 'trace',
+  picture: () => ({ src: traceSrc, name: traceName }),
+  pickPicture: () => gFile.click(),
+  loadDemo,
+  traced: () => (traceRes && result ? { sheets: result.layers.length, pieces: result.layers.reduce((a, l) => a + l.islands, 0) } : null),
+  traceStatus, traceList, drawTraceList,
+  autoOrder: () => { traceOrder = null; schedule(0); },
+  colourPanel,
+  redrawPrompt: () => REDRAW_PROMPT(S.traceColours),
+  setMaterial: (v) => { S.material = v; Object.assign(S, MATERIALS[v].s); },
+  showView,
+  changed: (resetOrder) => { if (resetOrder) { traceOrder = null; tracePalette = null; } syncAll(); schedule(); },
+  exportNow: () => $('#export').click(),
+  setAdvanced: (on) => setMode(!on),
+});
+$('#gbarhost').append(guided.bar);
+$('.body').prepend(guided.host);
+function setMode(g: boolean) {
+  guidedOn = g;
+  localStorage.setItem('lc.mode', g ? 'guided' : 'advanced');
+  document.body.classList.toggle('guided', g);
+  const b = $('#mode'); b.textContent = g ? 'Advanced' : 'Guided'; b.setAttribute('aria-pressed', g ? 'false' : 'true');
+  b.title = g ? 'Every setting, for fine-tuning' : 'Step by step, only the essentials';
+  buildPanel();
+  if (g) guided?.enter();
+  render();
+}
+$('#mode').addEventListener('click', () => setMode(!guidedOn));
+setMode(localStorage.getItem('lc.mode') !== 'advanced');
 render();
 const forceJs = new URLSearchParams(location.search).has('js');
 // the coordinator needs geometry on this thread too (hashing, outlines)
