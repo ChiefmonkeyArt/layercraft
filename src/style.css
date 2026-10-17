@@ -269,3 +269,13 @@ body:not(.guided) .modebtn { margin-left: 0; order: 9; }
 }
 body.guided .status .dim { display: none; }
 body.guided .status .details { display: none; }
+.gplist { display: flex; flex-direction: column; gap: 6px; }
+.gproj { display: flex; align-items: center; gap: 12px; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; cursor: pointer; background: var(--panel-2); }
+.gproj:hover { border-color: #4a4038; }
+.gproj.on { border-color: rgba(255, 122, 61, .55); }
+.gproj img, .gproj i { width: 44px; height: 44px; border-radius: 6px; object-fit: cover; background: var(--bg); flex: none; }
+.gproj span { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.gproj b { font-size: var(--text-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gproj small { color: var(--muted); font-size: var(--text-xs); }
+.gpdel { border: 0; background: transparent; color: var(--faint); font-size: 1.2rem; width: 32px; height: 32px; border-radius: 6px; cursor: pointer; }
+.gpdel:hover { color: var(--text); background: var(--bg); }

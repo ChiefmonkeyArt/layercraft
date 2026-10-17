@@ -32,15 +32,17 @@ export interface Settings {
   // frame corners: scrollwork in the corners of a rectangular panel
   // trace: an uploaded image, one flat colour per sheet
   traceColours: number; traceSmooth: number; traceMinPiece: number; traceDarkFirst: boolean;
+  traceFollow?: boolean; // the outer cut follows the traced artwork instead of a plate
   corners: boolean; cornerSize: number; cornerRings: number; cornerGap: number; cornerCurl: number; cornerBars: boolean;
 }
 
-export interface TraceInput { sig: string; openings: Pt[][][] }
+export interface TraceInput { sig: string; openings: Pt[][][]; outline?: Pt[] }
 export interface EngineInput { s: Settings; sketch: Pt[][]; imported: Pt[][]; free?: FreeArt; trace?: TraceInput | null }
 
 export interface LayerOut { material: Paths; groups: G.Group[]; islands: number; cutLength: number; isBack: boolean }
 export interface EngineResult {
   layers: LayerOut[]; outer: Paths; reg: Pt[]; thin: Paths;
+  labelAt?: Pt; // where layer numbers are engraved, when the outline is not a plate
   warnings: string[]; ms: number; openingsTop: number;
   details: { layer: number; motifs: string[] }[];
   backend?: string;
@@ -276,13 +278,15 @@ export async function computeAsync(
   const C = CACHE;
   const detailsOn = !!s.detailMode && s.detailMode !== 'off';
   const dStart = s.detailStart ?? 2, dEvery = Math.max(1, s.detailEvery);
-  const outerP = G.orient(G.toPath(outerShape(s)), true);
+  const followOutline = s.repeat === 'trace' && !!s.traceFollow && !!trace?.outline && trace.outline.length > 2 ? trace.outline : null;
+  const outerP = G.orient(G.toPath(followOutline ?? outerShape(s)), true);
   const outer = [outerP];
 
 
   const reg: Pt[] = [];
   let regPaths: Paths = [];
-  if (s.regHoles) {
+  if (s.regHoles && followOutline) warnings.push('Alignment holes are off while the outline follows the picture: line the sheets up by their shared outer edge.');
+  else if (s.regHoles) {
     if (s.border >= s.regDia + 3) {
       reg.push(...regPoints(s));
       regPaths = reg.map(([x, y]) => G.orient(G.toPath(G.circle(x, y, s.regDia / 2, 48)), false));
@@ -302,7 +306,7 @@ export async function computeAsync(
 
   if (s.repeat === 'trace') {
     // traced image: each sheet's openings come straight from the tracer
-    const inner = G.offset(outer, -s.border);
+    const inner = followOutline ? G.offset(outer, -Math.max(0.5, s.minRib)) : G.offset(outer, -s.border);
     const layers: LayerOut[] = [];
     if (trace) trace.openings.forEach((rings, k) => {
       const mk = `trace|${k}`;
@@ -328,7 +332,9 @@ export async function computeAsync(
     }
     const isl = layers.reduce((a, l) => a + l.islands, 0);
     if (isl) warnings.push(`${isl} loose piece${isl > 1 ? 's' : ''} across all sheets. Each one glues onto the solid sheet behind it, in the same place it was cut from.`);
-    return { layers, outer, reg, thin, warnings, ms: performance.now() - t0, openingsTop: layers[0]?.groups.length ?? 0, details: [], backend: G.geomBackend };
+    let labelAt: Pt | undefined;
+    if (followOutline) { let by = -Infinity, bx = 0; for (const [x, y] of followOutline) if (y > by) { by = y; bx = x; } labelAt = [bx, by - Math.max(2.5, s.minRib * 2)]; }
+    return { layers, outer, reg, thin, warnings, labelAt, ms: performance.now() - t0, openingsTop: layers[0]?.groups.length ?? 0, details: [], backend: G.geomBackend };
   }
 
   if (!C.open0) {

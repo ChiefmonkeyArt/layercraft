@@ -75,7 +75,11 @@ export function layerContent(r: EngineResult, s: Settings, i: number, dx: number
   const L = r.layers[i];
   const groups = s.kerf > 0 ? G.groups(G.offset(L.material, s.kerf / 2, 'miter')) : L.groups;
   let out = `<path fill="none" stroke="${CUT}" stroke-width="0.1" d="${groupsD(groups, dx, dy)}"/>`;
-  if (s.numbers && s.border >= 6) {
+  if (s.numbers && r.labelAt) {
+    // outline follows the picture: engrave small numbers just inside the bottom edge
+    const text = labelFor(i, r) + ' ^';
+    out += `<path fill="none" stroke="${ENGRAVE}" stroke-width="0.1" stroke-linecap="round" d="${linesD(strokeText(text, r.labelAt[0], r.labelAt[1], 1.6), dx, dy)}"/>`;
+  } else if (s.numbers && s.border >= 6) {
     const [x, y, h] = labelPos(s);
     const text = labelFor(i, r) + ' ^';
     out += `<path fill="none" stroke="${ENGRAVE}" stroke-width="0.1" stroke-linecap="round" d="${linesD(strokeText(text, x, y, h), dx, dy)}"/>`;
@@ -89,6 +93,26 @@ const header = (w: number, h: number, title: string) =>
 export function layerSVG(r: EngineResult, s: Settings, i: number): string {
   return header(s.width, s.height, `Layer ${labelFor(i, r)}`) +
     `<g id="layer-${i + 1}">${layerContent(r, s, i, s.width / 2, s.height / 2)}</g>\n</svg>\n`;
+}
+
+const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
+/**
+ * Every sheet in one file, stacked in place, each as its own named layer
+ * (Inkscape layers; LightBurn and Illustrator read them as groups). Top sheet first in the
+ * layer list; the colour is noted in each layer's name for painting or choosing card.
+ */
+export function allLayersSVG(r: EngineResult, s: Settings, name: string, sheetColours?: string[]): string {
+  const n = r.layers.length;
+  let body = '';
+  // SVG paints later elements on top, so write the back first and the top sheet last
+  for (let i = n - 1; i >= 0; i--) {
+    const L = r.layers[i];
+    const tag = L.isBack ? 'back' : i === 0 ? 'top' : 'layer';
+    const col = sheetColours?.[i] ? ` ${sheetColours[i].toUpperCase()}` : '';
+    const label = `${String(i + 1).padStart(2, '0')} ${tag}${col}`;
+    body += `<g id="sheet-${String(i + 1).padStart(2, '0')}" inkscape:groupmode="layer" inkscape:label="${esc(label)}">${layerContent(r, s, i, s.width / 2, s.height / 2)}</g>\n`;
+  }
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${f(s.width)}mm" height="${f(s.height)}mm" viewBox="0 0 ${f(s.width)} ${f(s.height)}">\n<title>${esc(name)} — all ${n} sheets</title>\n` + body + '</svg>\n';
 }
 
 export interface SheetPlan { sheets: number[][]; cols: number; rows: number; fits: boolean }
@@ -120,6 +144,7 @@ export async function exportZip(r: EngineResult, s: Settings, project: unknown, 
     const tag = l.isBack ? 'back' : i === 0 ? 'top' : 'layer';
     L.file(`${String(i + 1).padStart(2, '0')}-${tag}.svg`, layerSVG(r, s, i));
   });
+  zip.file('all-layers.svg', allLayersSVG(r, s, name, sheetColours));
   const plan = planSheets(r, s);
   if (plan.fits) {
     const S = zip.folder('bed-sheets')!;
@@ -146,6 +171,7 @@ export async function exportZip(r: EngineResult, s: Settings, project: unknown, 
     s.regHoles ? `  Pass ${s.regDia} mm dowels (or pins for paper) through the corner holes to align the stack while gluing.` : null,
     ``,
     `Files`,
+    `  all-layers.svg  every sheet in one file, stacked in place, one named layer per sheet (Inkscape / LightBurn)`,
     `  layers/       one SVG per sheet at true size (mm)`,
     plan.fits ? `  bed-sheets/   sheets nested onto your ${s.bedW} x ${s.bedH} mm bed (${plan.cols * plan.rows} per sheet)` : `  (artwork is larger than the bed, so no bed sheets were made)`,
     `  project.json  re-open in Layercraft Stack to edit`,

@@ -25,9 +25,18 @@ export interface GuidedApi {
   colourPanel: () => HTMLElement;
   redrawPrompt: () => string;
   setMaterial: (id: string) => void;
+  fitToArtwork: () => void;
   showView: (v: View) => void;
   changed: (resetOrder?: boolean) => void; // settings changed: re-trace / recompute
   exportNow: () => void;
+  exportAllLayers: () => void;
+  projects: {
+    list: () => Promise<{ id: string; name: string; updated: number; thumb: string }[]>;
+    open: (id: string) => Promise<boolean>;
+    remove: (id: string) => Promise<void>;
+    current: () => string;
+    startNew: () => void;
+  };
   setAdvanced: (on: boolean) => void;
 }
 
@@ -40,7 +49,6 @@ export function createGuided(api: GuidedApi) {
   const host = h('aside', { class: 'gpanel', id: 'gpanel', 'aria-label': 'Guided steps' });
   const bar = h('nav', { class: 'gsteps', 'aria-label': 'Progress' });
   let step = Math.max(0, Math.min(7, Number(store.get(LS_STEP) ?? 0) | 0));
-  if (step > 0 && !api.hasPicture()) step = 0;
 
   const chips = <T,>(label: string, opts: [T, string, string?][], get: () => T, set: (v: T) => void) => {
     const wrap = h('div', { class: 'gchips', role: 'radiogroup', 'aria-label': label });
@@ -58,16 +66,43 @@ export function createGuided(api: GuidedApi) {
   const soon = (title: string, text: string) =>
     h('div', { class: 'gsoon' }, h('b', {}, title), h('span', { class: 'gbadge' }, 'Coming soon'), h('p', {}, text));
   const lead = (t: string) => h('p', { class: 'glead' }, t);
+  const ago = (t: number) => {
+    const m = Math.round((Date.now() - t) / 60000);
+    if (m < 1) return 'just now'; if (m < 60) return `${m} min ago`;
+    const hr = Math.round(m / 60); if (hr < 24) return `${hr} h ago`;
+    const d = Math.round(hr / 24); return d < 14 ? `${d} day${d > 1 ? 's' : ''} ago` : new Date(t).toLocaleDateString();
+  };
+  /** Projects saved in this browser, newest first. */
+  function projectList() {
+    const wrap = h('div', { class: 'gfield gprojects', hidden: true });
+    void api.projects.list().then((ps) => {
+      if (!ps.length) return;
+      wrap.hidden = false;
+      const list = h('div', { class: 'gplist' });
+      for (const p of ps.slice(0, 12)) {
+        const del = h('button', { class: 'gpdel', 'aria-label': `Delete ${p.name}`, title: 'Delete from this browser',
+          onclick: async (e: Event) => { e.stopPropagation(); if (!confirm(`Delete “${p.name}” from this browser?`)) return; await api.projects.remove(p.id); draw(); } }, '×');
+        list.append(h('div', { class: 'gproj' + (p.id === api.projects.current() ? ' on' : ''), role: 'button', tabindex: '0',
+          onclick: async () => { if (await api.projects.open(p.id)) go(api.hasPicture() ? 1 : 0); },
+          onkeydown: async (e: KeyboardEvent) => { if (e.key === 'Enter' && (await api.projects.open(p.id))) go(api.hasPicture() ? 1 : 0); } },
+          p.thumb ? h('img', { src: p.thumb, alt: '' }) : h('i', {}),
+          h('span', {}, h('b', {}, p.name), h('small', {}, ago(p.updated))), del));
+      }
+      wrap.append(h('div', { class: 'glab' }, 'Continue a project'), list, h('p', { class: 'note' }, 'Saved automatically in this browser. Nothing leaves your device.'));
+    });
+    return wrap;
+  }
 
   const STEPS: Step[] = [
     { id: 'start', label: 'Start', view: 'stack', needsPicture: false, body: () => [
       h('h2', {}, 'Make something layered'),
       lead('Turn a picture into a stack of laser-cut sheets. Every colour becomes its own layer.'),
+      projectList(),
       h('div', { class: 'gcards' },
         h('button', { class: 'gcard hero', onclick: async () => { await api.loadDemo(); go(1); } },
           h('img', { src: './demo/daruma.webp', alt: '', loading: 'lazy' }),
           h('span', {}, h('b', {}, 'Try the Daruma demo'), h('small', {}, 'A trippy perseverance doll, ready to trace'))),
-        h('button', { class: 'gcard', onclick: () => api.pickPicture() },
+        h('button', { class: 'gcard', onclick: () => { api.projects.startNew(); api.pickPicture(); } },
           h('span', {}, h('b', {}, 'Use my own picture'), h('small', {}, 'PNG, JPEG or WebP. Flat colours work best'))),
         h('div', { class: 'gcard off', 'aria-disabled': 'true' },
           h('span', {}, h('b', {}, 'Describe an idea'), h('small', {}, 'AI creates the picture. Pay per use with Bitcoin, no account. Coming soon'))),
@@ -103,8 +138,9 @@ export function createGuided(api: GuidedApi) {
       lead('Pick how many colours to find. Each colour becomes one sheet.'),
       chips('Colours', [[5, '5'], [7, '7'], [9, '9'], [12, '12']], () => S.traceColours, (v) => { S.traceColours = v; api.changed(true); }),
       chips('Edges', [[0.9, 'Soft', 'flowing curves'], [0.45, 'Crisp', 'more detail']], () => (S.traceSmooth >= 0.55 ? 0.9 : 0.45), (v) => { S.traceSmooth = v; api.changed(); }),
-      chips('Outline', [['rect', 'Rectangle'], ['circle', 'Circle']], () => (S.shape === 'circle' ? 'circle' : 'rect'), (v) => { S.shape = v as Settings['shape']; api.changed(); }),
-      soon('Follow the picture', 'The outer cut follows the shape of your artwork, like the Daruma, instead of a plate.'),
+      chips('Outline', [['follow', 'Follow the picture', 'background removed'], ['rect', 'Rectangle'], ['circle', 'Circle']],
+        () => (S.traceFollow ? 'follow' : S.shape === 'circle' ? 'circle' : 'rect'),
+        (v) => { if (v === 'follow') { S.traceFollow = true; api.fitToArtwork(); } else { S.traceFollow = false; S.shape = v as Settings['shape']; } api.changed(); }),
       api.traceStatus,
     ] },
     { id: 'layers', label: 'Layers', view: '3d', needsPicture: true, body: () => {
@@ -135,9 +171,10 @@ export function createGuided(api: GuidedApi) {
       return [
         h('h2', {}, 'Ready to cut'),
         lead(t ? `${t.sheets} sheets${t.pieces ? `, ${t.pieces} loose pieces to glue in` : ''}.` : 'Still tracing…'),
-        h('button', { class: 'btn primary gbig', onclick: () => api.exportNow() }, 'Download SVG files'),
-        h('p', { class: 'note' }, 'A ZIP with one SVG per layer, sheets packed for your laser bed, a colour list and the project file.'),
-        soon('One SVG with every layer', 'A single file with each sheet as its own named layer, for Inkscape or LightBurn.'),
+        h('button', { class: 'btn primary gbig', onclick: () => api.exportNow() }, 'Download everything (ZIP)'),
+        h('p', { class: 'note' }, 'One SVG with every layer, one SVG per layer, sheets packed for your laser bed, a colour list and the project file.'),
+        h('button', { class: 'btn', onclick: () => api.exportAllLayers() }, 'Just the one SVG with every layer'),
+        h('p', { class: 'note' }, 'Each sheet is its own named layer, stacked in place, for Inkscape or LightBurn.'),
         h('div', { class: 'gok' }, h('b', {}, 'Want to fine-tune?'), h('p', {}, 'Advanced has every setting: sizes, kerf, ribs, alignment holes and more.'),
           h('button', { class: 'btn small', onclick: () => api.setAdvanced(true) }, 'Open in Advanced')),
       ];

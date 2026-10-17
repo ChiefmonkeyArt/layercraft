@@ -16,6 +16,8 @@ export interface TraceOpts {
   darkFirst: boolean;       // keep the darkest colour as the top sheet
   order?: number[];         // manual order: palette indices, top to bottom
   palette?: string[];       // reuse these colours instead of finding new ones
+  follow?: boolean;         // the outer cut follows the artwork's silhouette (background removed)
+  rimMm?: number;           // follow: solid rim around the silhouette, mm
 }
 export interface TraceOut {
   palette: string[];        // found colours (#rrggbb), in palette index order
@@ -23,6 +25,7 @@ export interface TraceOut {
   order: number[];          // palette indices, top sheet first; the last one is the back panel
   openings: Pt[][][];       // per cut sheet (all but the back): rings of the openings, mm, centred
   pieces: number[];         // loose glue-in pieces per sheet
+  outline?: Pt[];           // follow: the outer cut, mm, centred on the image area
   ms: number;
 }
 
@@ -345,6 +348,48 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
     }
     lbl = bestL;
   }
+  // follow the picture: the background is the colour that fills the picture's edge,
+  // flood-filled inwards; everything else is the artwork's silhouette
+  let outline: Pt[] | undefined;
+  if (o.follow) {
+    progress?.('Finding the outline…');
+    const cnt = new Map<number, number>();
+    for (let x = 0; x < w; x++) for (const y of [0, h - 1]) { const c = lbl[y * w + x]; cnt.set(c, (cnt.get(c) ?? 0) + 1); }
+    for (let y = 0; y < h; y++) for (const x of [0, w - 1]) { const c = lbl[y * w + x]; cnt.set(c, (cnt.get(c) ?? 0) + 1); }
+    let bg = 0, bc = -1; for (const [c, v] of cnt) if (v > bc) { bc = v; bg = c; }
+    const bgm = new Uint8Array(N), st = new Int32Array(N); let sp = 0;
+    const push = (i: number) => { if (!bgm[i] && lbl[i] === bg) { bgm[i] = 1; st[sp++] = i; } };
+    for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+    for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+    while (sp) { const i = st[--sp], x = i % w; if (x > 0) push(i - 1); if (x < w - 1) push(i + 1); if (i >= w) push(i - w); if (i < N - w) push(i + w); }
+    let sil: Mask = new Uint8Array(N); for (let i = 0; i < N; i++) sil[i] = bgm[i] ? 0 : 1;
+    // keep the biggest piece and fill its holes, then round off tiny notches
+    const cs = components(sil, w, h);
+    let big = 1; for (let j = 2; j <= cs.n; j++) if (cs.size[j] > cs.size[big]) big = j;
+    for (let i = 0; i < N; i++) sil[i] = cs.lab[i] === big ? 1 : 0;
+    const inv = new Uint8Array(N); for (let i = 0; i < N; i++) inv[i] = sil[i] ? 0 : 1;
+    const hc = components(inv, w, h);
+    const edge = new Set<number>(); for (let x = 0; x < w; x++) { edge.add(hc.lab[x]); edge.add(hc.lab[(h - 1) * w + x]); } for (let y = 0; y < h; y++) { edge.add(hc.lab[y * w]); edge.add(hc.lab[y * w + w - 1]); }
+    for (let i = 0; i < N; i++) if (hc.lab[i] && !edge.has(hc.lab[i])) sil[i] = 1;
+    if (cs.n > 0 && cs.size[big] > N * 0.02) {
+      sil = close(sil, w, h, Math.max(1, 1.2 / px));
+      for (let i = 0; i < N; i++) inside[i] = inside[i] && sil[i] ? 1 : 0;
+      // outline: silhouette grown by the rim, traced on a padded field so it may leave the picture
+      const rim = Math.max(0, o.rimMm ?? 3) / px, pad = Math.ceil(rim) + 3;
+      const pw = w + 2 * pad, ph = h + 2 * pad;
+      const pm = new Uint8Array(pw * ph);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) pm[(y + pad) * pw + x + pad] = sil[y * w + x];
+      const grown = rim > 0.5 ? dilate(pm, pw, ph, rim) : pm;
+      const fld = new Float32Array(pw * ph); for (let i = 0; i < fld.length; i++) fld[i] = grown[i] ? 0 : 1;
+      const g = blur(fld, pw, ph, Math.max(0.8, 0.8 / px));
+      for (let x = 0; x < pw; x++) { g[x] = 1; g[(ph - 1) * pw + x] = 1; }
+      for (let y = 0; y < ph; y++) { g[y * pw] = 1; g[y * pw + pw - 1] = 1; }
+      const rings = contours(g, pw, ph).map((r) => rdpClosed(smoothRing(r, 1.2), 0.04 / px)).filter((r) => r.length >= 3);
+      const area = (r: Pt[]) => { let a = 0; for (let i = 0; i < r.length; i++) { const [x1, y1] = r[i], [x2, y2] = r[(i + 1) % r.length]; a += x1 * y2 - x2 * y1; } return Math.abs(a / 2); };
+      const best = rings.sort((a, b) => area(b) - area(a))[0];
+      if (best) outline = best.map(([x, y]) => [(x - pad + 0.5 - w / 2) * px, (y - pad + 0.5 - h / 2) * px] as Pt);
+    }
+  }
   const share = P.map(() => 0); let nin = 0;
   for (let i = 0; i < N; i++) if (inside[i]) { share[lbl[i]]++; nin++; }
   for (let c = 0; c < Kp; c++) share[c] = +(share[c] * 100 / Math.max(1, nin)).toFixed(1);
@@ -485,7 +530,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
       .map((r) => r.map(([x, y]) => [(x - 1 + 0.5 - w / 2) * px, (y - 1 + 0.5 - h / 2) * px] as Pt));
     openings.push(rings);
   }
-  return { palette: P.map((c) => { const [r, g, b] = labToRgb(c); return hex(r, g, b); }), share, order, openings, pieces, ms: performance.now() - t0 };
+  return { palette: P.map((c) => { const [r, g, b] = labToRgb(c); return hex(r, g, b); }), share, order, openings, pieces, outline, ms: performance.now() - t0 };
 }
 
 function labToRgb([l, a, b]: number[]): [number, number, number] {

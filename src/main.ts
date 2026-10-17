@@ -13,8 +13,9 @@ let loading3d = false;
 import { MOTIFS } from './motifs';
 import type { TraceOpts, TraceOut } from './trace';
 import { REDRAW_PROMPT, trace as traceNow } from './trace';
-import { download, exportZip, layerSVG, parseSVG, planSheets, simplify } from './svgio';
+import { allLayersSVG, download, exportZip, layerSVG, parseSVG, planSheets, simplify } from './svgio';
 import { createGuided, store } from './guided';
+import { deleteProject, getProject, listProjects, newId, saveProject } from './projects';
 
 // ---------------- materials ----------------
 const MATERIALS: Record<string, { name: string; s: Partial<Settings> }> = {
@@ -36,7 +37,7 @@ const S: Settings = {
   detailMode: 'symmetric', detailStart: 2, detailEvery: 2, detailSpacing: 5, detailVariety: 0.75,
   motifs: MOTIFS.map((m) => m.id),
   repeat: 'centre', freeMirror: 'lr', flowEchoes: 4, flowSpacing: 4, scrollSize: 14, scrollGap: 22,
-  traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true,
+  traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false,
   corners: false, cornerSize: 0.9, cornerRings: 3, cornerGap: 4.5, cornerCurl: 30, cornerBars: true,
 };
 // Free mode drawing: raw strokes per tool (mirroring is applied when the design is built)
@@ -59,6 +60,8 @@ const colourKey = () => (colourway === 'custom' ? `custom#${CUSTOM.version}` : c
 let view: 'stack' | '3d' | 'layers' | 'sketch' = 'stack';
 let guided: ReturnType<typeof createGuided> | null = null;
 let guidedOn = false;
+let booted = false, touched = false; // autosave only once the user has changed something
+let projectId = '';
 let layerIdx = 0;
 let sym = 8, mirror = true;
 let projectName = 'Untitled stack';
@@ -298,7 +301,7 @@ function buildPanel() {
 // listed with one-tap Gradient / Contrast / pick-a-colour choices.
 const colourHost = h('div', { class: 'colours' });
 let colourSig = '';
-function colourChanged() { CUSTOM.version++; colourSig = ''; refreshColours(); render(); }
+function colourChanged() { CUSTOM.version++; colourSig = ''; refreshColours(); render(); if (booted) { touched = true; autosave(); } }
 /** Live colour edit: repaint without rebuilding the panel, so the picker stays open. */
 function colourLive() { CUSTOM.version++; render(); }
 const nm = (id: string) => MOTIFS.find((m) => m.id === id)?.name ?? id;
@@ -463,6 +466,7 @@ function setTraceMsg(m: string) { traceMsg = m; traceStatus.textContent = m; }
 
 function traceArea() {
   const b = S.border;
+  if (S.traceFollow) return [S.width - 2 * b, S.height - 2 * b];
   if (S.shape === 'circle') { const d = Math.min(S.width, S.height) - 2 * b; return [d, d]; }
   if (S.shape === 'hex') { const r = Math.min(S.width / 2, S.height / 2 / (Math.sqrt(3) / 2)); return [2 * r - 2 * b, Math.sqrt(3) * r - 2 * b]; }
   return [S.width - 2 * b, S.height - 2 * b];
@@ -470,7 +474,7 @@ function traceArea() {
 function traceOpts(): TraceOpts {
   const [wm, hm] = traceArea();
   return { colours: S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening,
-    widthMm: wm, heightMm: hm, shape: S.shape, darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined };
+    widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined };
 }
 const traceKeyOf = (o: TraceOpts) => JSON.stringify([o, traceSrc.length, traceSrc.slice(-64), traceCrop]);
 
@@ -515,11 +519,19 @@ async function onTraceFile(f: File) {
     }
     traceSrc = src; traceName = f.name; traceImgEl = im;
     traceCrop = autoCrop(im);
+    if (S.traceFollow) fitToArtwork();
     traceOrder = null; tracePalette = null; traceRes = null; traceKey = '';
     if (S.repeat !== 'trace') setRepeat('trace'); else buildPanel();
     schedule(0);
     guided?.pictureChosen();
   } catch (e: any) { toast(e.message || 'Could not read that image'); }
+}
+/** Follow mode: keep the width, and set the height to the artwork's proportions. */
+function fitToArtwork() {
+  if (!traceCrop) return;
+  const [, , cw, ch] = traceCrop;
+  if (cw > 0 && ch > 0) S.height = Math.round(Math.min(1200, Math.max(60, (S.width - 2 * S.border) * (ch / cw) / 0.97 + 2 * S.border)));
+  syncAll();
 }
 /** Pixels of the picture, fitted (cover) to the trace area at a working resolution. */
 async function traceImage(o: TraceOpts) {
@@ -531,8 +543,15 @@ async function traceImage(o: TraceOpts) {
   const c = document.createElement('canvas'); c.width = w; c.height = hh;
   const x = c.getContext('2d')!;
   const [cx, cy, cw, ch] = traceCrop ?? [0, 0, im.naturalWidth, im.naturalHeight];
-  const sc = Math.max(w / cw, hh / ch);
+  // a plate is covered edge to edge; a followed outline fits the whole artwork, with a little background round it
+  const sc = o.follow ? Math.min(w / cw, hh / ch) * 0.97 : Math.max(w / cw, hh / ch);
   const dw = cw * sc, dh = ch * sc;
+  if (o.follow) {
+    const t = document.createElement('canvas'); t.width = t.height = 1;
+    const tx = t.getContext('2d')!; tx.drawImage(im, 0, 0, 1, 1, 0, 0, 1, 1);
+    const [r, g, b] = tx.getImageData(0, 0, 1, 1).data;
+    x.fillStyle = `rgb(${r},${g},${b})`; x.fillRect(0, 0, w, hh);
+  }
   x.imageSmoothingQuality = 'high';
   x.drawImage(im, cx, cy, cw, ch, (w - dw) / 2, (hh - dh) / 2, dw, dh);
   const d = x.getImageData(0, 0, w, hh); // throws if the browser blocks reading the picture
@@ -646,6 +665,7 @@ function traceControls(): Node[] {
     slider('Colours (sheets)', () => S.traceColours, (v) => { S.traceColours = v; traceOrder = null; tracePalette = null; }, 3, 16, 1, '', 'How many flat colours to find; each one is a sheet'),
     slider('Smoothness', () => S.traceSmooth, (v) => (S.traceSmooth = v), 0, 2, 0.05, 'mm', 'Rounds every edge into flowing curves; higher loses fine detail'),
     slider('Smallest loose piece', () => S.traceMinPiece, (v) => (S.traceMinPiece = v), 2, 200, 1, 'mm²', 'Loose pieces smaller than this blend into the colour around them'),
+    toggle('Outline follows the picture', () => !!S.traceFollow, (v) => { S.traceFollow = v; }),
     toggle('Darkest colour on top', () => S.traceDarkFirst, (v) => { S.traceDarkFirst = v; traceOrder = null; }),
     h('div', { class: 'row col' }, h('span', { class: 'lab' }, 'Layer order, top to bottom'), traceList,
       h('button', { class: 'btn small ghost', onclick: () => { traceOrder = null; schedule(0); } }, 'Auto order (fewest loose pieces)')),
@@ -705,6 +725,7 @@ function onResult(data: { id: number; result?: EngineResult; error?: string; par
   layerIdx = Math.min(layerIdx, result.layers.length - 1);
   render();
   guided?.computed();
+  autosave();
 }
 // Build workers the same way the single worker is built: direct URL, else a blob copy.
 let blobUrl: string | null = null;
@@ -785,13 +806,14 @@ function runRequest(id: number, input: unknown) {
   }, 16);
 }
 function schedule(delay = 140) {
+  if (booted) touched = true;
   clearTimeout(timer);
   timer = window.setTimeout(() => {
     reqId++;
     pending = true;
     $('#busy').classList.add('on');
     if (!traceFresh()) { pending = false; return; } // the trace finishes first, then schedules again
-    const tr = S.repeat === 'trace' && traceRes ? { sig: traceKey, openings: traceRes.openings } : null;
+    const tr = S.repeat === 'trace' && traceRes ? { sig: traceKey, openings: traceRes.openings, outline: traceRes.outline } : null;
     runRequest(reqId, { s: JSON.parse(JSON.stringify(S)), sketch, imported, free, trace: tr });
   }, delay);
 }
@@ -1062,20 +1084,8 @@ function showView(v: typeof view) {
 }
 document.querySelectorAll<HTMLButtonElement>('.tabs [data-v]').forEach((b) => b.addEventListener('click', () => showView(b.dataset.v as any)));
 
-const slug = () => projectName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'stack';
-const projectData = () => ({ app: 'layercraft-stack', version: 2, name: projectName, settings: S, colourway, colours: { top: CUSTOM.top, bottom: CUSTOM.bottom, sheet: CUSTOM.sheet }, sketch, imported, importName, free, trace: traceSrc ? { src: traceSrc, name: traceName, crop: traceCrop, order: traceOrder, palette: tracePalette } : null });
-
-$('#pname').addEventListener('input', (e) => { projectName = (e.target as HTMLInputElement).value || 'Untitled stack'; });
-$('#save').addEventListener('click', () => download(new Blob([JSON.stringify(projectData())], { type: 'application/json' }), `${slug()}.layercraft.json`));
-$('#open').addEventListener('click', () => $('#openfile').click());
-$<HTMLInputElement>('#openfile').addEventListener('change', async (e) => {
-  const inp = e.target as HTMLInputElement;
-  const f = inp.files?.[0];
-  if (!f) return;
-  if (f.size > MAX_PROJECT_BYTES) { toast('That project file is too large to open'); inp.value = ''; return; }
-  try {
-    const d = JSON.parse(await f.text());
-    Object.assign(S, { detailMode: 'off', repeat: 'centre', corners: false, traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true }, d.settings); // older projects had no detail layers or Free mode
+function applyProject(d: any) {
+    Object.assign(S, { detailMode: 'off', repeat: 'centre', corners: false, traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false }, d.settings); // older projects had no detail layers or Free mode
     free = d.free ?? emptyFree(); freeUndo.length = 0;
     colourway = d.colourway ?? 'natural';
     if (d.colours) { CUSTOM.top = d.colours.top ?? CUSTOM.top; CUSTOM.bottom = d.colours.bottom ?? CUSTOM.bottom; CUSTOM.sheet = { ...(d.colours.sheet ?? d.colours.detail ?? {}) }; }
@@ -1088,7 +1098,24 @@ $<HTMLInputElement>('#openfile').addEventListener('change', async (e) => {
     if (traceCrop && !(Array.isArray(traceCrop) && traceCrop.length === 4 && traceCrop.every((v) => typeof v === 'number' && isFinite(v)))) traceCrop = null;
     projectName = d.name ?? 'Untitled stack';
     $<HTMLInputElement>('#pname').value = projectName;
-    buildPanel(); schedule(0); toast(`Opened ${projectName}`);
+    buildPanel(); schedule(0);
+}
+const slug = () => projectName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'stack';
+const projectData = () => ({ app: 'layercraft-stack', version: 2, name: projectName, settings: S, colourway, colours: { top: CUSTOM.top, bottom: CUSTOM.bottom, sheet: CUSTOM.sheet }, sketch, imported, importName, free, trace: traceSrc ? { src: traceSrc, name: traceName, crop: traceCrop, order: traceOrder, palette: tracePalette } : null });
+
+$('#pname').addEventListener('input', (e) => { projectName = (e.target as HTMLInputElement).value || 'Untitled stack'; touched = true; autosave(); });
+$('#save').addEventListener('click', () => download(new Blob([JSON.stringify(projectData())], { type: 'application/json' }), `${slug()}.layercraft.json`));
+$('#open').addEventListener('click', () => $('#openfile').click());
+$<HTMLInputElement>('#openfile').addEventListener('change', async (e) => {
+  const inp = e.target as HTMLInputElement;
+  const f = inp.files?.[0];
+  if (!f) return;
+  if (f.size > MAX_PROJECT_BYTES) { toast('That project file is too large to open'); inp.value = ''; return; }
+  try {
+    const d = JSON.parse(await f.text());
+    applyProject(d);
+    projectId = newId(); touched = true; store.set('lc.current', projectId);
+    toast(`Opened ${projectName}`);
   } catch { toast('That file is not a Layercraft project'); }
   inp.value = '';
 });
@@ -1105,6 +1132,41 @@ $('#export').addEventListener('click', async () => {
   download(blob, `${slug()}-laser-svgs.zip`);
   toast(`Exported ${result.layers.length} sheets`);
 });
+
+// ---------------- autosave (this browser only) ----------------
+let saveTimer = 0;
+function thumbOf(): string {
+  try {
+    const t = document.createElement('canvas'), k = 220 / Math.max(cv.width, cv.height);
+    t.width = Math.max(1, Math.round(cv.width * k)); t.height = Math.max(1, Math.round(cv.height * k));
+    const x = t.getContext('2d')!; x.fillStyle = '#11100e'; x.fillRect(0, 0, t.width, t.height); x.drawImage(cv, 0, 0, t.width, t.height);
+    return t.toDataURL('image/jpeg', 0.75);
+  } catch { return ''; }
+}
+function autosave() {
+  if (!touched || !booted) return;
+  clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(async () => {
+    if (!projectId) { projectId = newId(); store.set('lc.current', projectId); }
+    const ok = await saveProject({ id: projectId, name: projectName, updated: Date.now(), thumb: view === 'stack' ? thumbOf() : ((await getProject(projectId))?.thumb ?? thumbOf()), data: projectData() });
+    if (!ok) console.warn('autosave failed');
+  }, 1200);
+}
+async function openSaved(id: string) {
+  const p = await getProject(id);
+  if (!p) { toast('That project is no longer saved here'); return false; }
+  applyProject(p.data); projectId = id; store.set('lc.current', id); touched = false;
+  return true;
+}
+function startNew() { projectId = newId(); store.set('lc.current', projectId); touched = true; }
+
+async function exportAllLayers() {
+  if (!result || pending) { toast('Still computing — try again in a moment'); return; }
+  await initGeom(forceJs);
+  const svg = allLayersSVG(result, S, projectName, colourway === 'natural' ? undefined : sheetColours());
+  download(new Blob([svg], { type: 'image/svg+xml' }), `${slug()}-all-layers.svg`);
+  toast(`Saved one SVG with ${result.layers.length} layers`);
+}
 
 $('#surprise').addEventListener('click', () => {
   if (S.repeat === 'trace') { toast('Surprise me works on the Centre and Free patterns — switch Repeat to try it'); return; }
@@ -1160,8 +1222,9 @@ async function loadDemo() {
     const r = await fetch('./demo/daruma.webp');
     if (!r.ok) throw new Error('demo missing');
     const f = new File([await r.blob()], 'trippy-daruma.webp', { type: 'image/webp' });
-    Object.assign(S, MATERIALS.birch.s, { material: 'birch', shape: 'rect', width: 300, height: 400, border: 8,
-      traceColours: 7, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, back: true });
+    Object.assign(S, MATERIALS.birch.s, { material: 'birch', shape: 'rect', width: 300, height: 400, border: 4,
+      traceColours: 7, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: true, back: true });
+    startNew();
     projectName = 'Trippy Daruma'; $<HTMLInputElement>('#pname').value = projectName;
     syncAll();
     await onTraceFile(f);
@@ -1179,9 +1242,12 @@ guided = createGuided({
   colourPanel,
   redrawPrompt: () => REDRAW_PROMPT(S.traceColours),
   setMaterial: (v) => { S.material = v; Object.assign(S, MATERIALS[v].s); },
+  fitToArtwork,
   showView,
   changed: (resetOrder) => { if (resetOrder) { traceOrder = null; tracePalette = null; } syncAll(); schedule(); },
   exportNow: () => $('#export').click(),
+  exportAllLayers: () => void exportAllLayers(),
+  projects: { list: listProjects, open: openSaved, remove: async (id: string) => { await deleteProject(id); if (id === projectId) { projectId = ''; store.set('lc.current', ''); } }, current: () => projectId, startNew },
   setAdvanced: (on) => setMode(!on),
 });
 $('#gbarhost').append(guided.bar);
@@ -1197,6 +1263,10 @@ function setMode(g: boolean) {
   render();
 }
 $('#mode').addEventListener('click', () => setMode(!guidedOn));
+{
+  const last = store.get('lc.current');
+  if (last && (await getProject(last))) await openSaved(last);
+}
 setMode(store.get('lc.mode') !== 'advanced');
 render();
 const forceJs = new URLSearchParams(location.search).has('js');
@@ -1205,5 +1275,6 @@ await initGeom(forceJs);
 if (!new URLSearchParams(location.search).has('single')) await startPool();
 if (!pool) await startWorker();
 schedule(0);
+setTimeout(() => { booted = true; }, 0);
 // main-thread geometry is only needed for export (kerf offsets); load it in the background
 void initGeom(forceJs);
