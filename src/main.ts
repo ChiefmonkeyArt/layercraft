@@ -14,7 +14,7 @@ import { MOTIFS } from './motifs';
 import type { TraceOpts, TraceOut } from './trace';
 import { REDRAW_PROMPT, trace as traceNow } from './trace';
 import { download, exportZip, layerSVG, parseSVG, planSheets, simplify } from './svgio';
-import { createGuided } from './guided';
+import { createGuided, store } from './guided';
 
 // ---------------- materials ----------------
 const MATERIALS: Record<string, { name: string; s: Partial<Settings> }> = {
@@ -1188,7 +1188,7 @@ $('#gbarhost').append(guided.bar);
 $('.body').prepend(guided.host);
 function setMode(g: boolean) {
   guidedOn = g;
-  localStorage.setItem('lc.mode', g ? 'guided' : 'advanced');
+  store.set('lc.mode', g ? 'guided' : 'advanced');
   document.body.classList.toggle('guided', g);
   const b = $('#mode'); b.textContent = g ? 'Advanced' : 'Guided'; b.setAttribute('aria-pressed', g ? 'false' : 'true');
   b.title = g ? 'Every setting, for fine-tuning' : 'Step by step, only the essentials';
@@ -1197,7 +1197,7 @@ function setMode(g: boolean) {
   render();
 }
 $('#mode').addEventListener('click', () => setMode(!guidedOn));
-setMode(localStorage.getItem('lc.mode') !== 'advanced');
+setMode(store.get('lc.mode') !== 'advanced');
 render();
 const forceJs = new URLSearchParams(location.search).has('js');
 // the coordinator needs geometry on this thread too (hashing, outlines)

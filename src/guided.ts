@@ -2,6 +2,12 @@
 // controls that step needs. Everything else lives in Advanced (the full app).
 import type { Settings } from './engine';
 
+/** localStorage that never throws (sandboxed frames and private modes can block it). */
+export const store = {
+  get(k: string): string | null { try { return window.localStorage.getItem(k); } catch { return null; } },
+  set(k: string, v: string) { try { window.localStorage.setItem(k, v); } catch { /* not available here */ } },
+};
+
 type View = 'stack' | '3d' | 'layers' | 'sketch';
 export interface GuidedApi {
   S: Settings;
@@ -33,7 +39,7 @@ export function createGuided(api: GuidedApi) {
   const { S, h } = api;
   const host = h('aside', { class: 'gpanel', id: 'gpanel', 'aria-label': 'Guided steps' });
   const bar = h('nav', { class: 'gsteps', 'aria-label': 'Progress' });
-  let step = Math.max(0, Math.min(7, Number(localStorage.getItem(LS_STEP) ?? 0) | 0));
+  let step = Math.max(0, Math.min(7, Number(store.get(LS_STEP) ?? 0) | 0));
   if (step > 0 && !api.hasPicture()) step = 0;
 
   const chips = <T,>(label: string, opts: [T, string, string?][], get: () => T, set: (v: T) => void) => {
@@ -173,7 +179,7 @@ export function createGuided(api: GuidedApi) {
     i = Math.max(0, Math.min(STEPS.length - 1, i));
     if (STEPS[i].needsPicture && !api.hasPicture()) { api.toast('Choose a picture first'); return; }
     step = i;
-    localStorage.setItem(LS_STEP, String(step));
+    store.set(LS_STEP, String(step));
     api.showView(STEPS[i].view);
     draw();
     content.scrollTop = 0;
