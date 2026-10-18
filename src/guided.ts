@@ -1,6 +1,9 @@
 // Guided mode: the default first-run experience. One step per screen, only the
 // controls that step needs. Everything else lives in Advanced (the full app).
 import type { Settings } from './engine';
+import type { AiUi } from './aiui';
+import { IDEA_PROMPT, fmtSats, fmtUsd } from './ai';
+import { nearestAspect } from './aiui';
 
 /** localStorage that never throws (sandboxed frames and private modes can block it). */
 export const store = {
@@ -38,6 +41,9 @@ export interface GuidedApi {
     startNew: () => void;
   };
   setAdvanced: (on: boolean) => void;
+  ai: AiUi;
+  usePicture: (url: string, name: string) => Promise<void>;
+  setName: (n: string) => void;
 }
 
 interface Step { id: string; label: string; view: View; needsPicture: boolean; body: () => Node[] }
@@ -66,6 +72,43 @@ export function createGuided(api: GuidedApi) {
   const soon = (title: string, text: string) =>
     h('div', { class: 'gsoon' }, h('b', {}, title), h('span', { class: 'gbadge' }, 'Coming soon'), h('p', {}, text));
   const lead = (t: string) => h('p', { class: 'glead' }, t);
+  let ideaOpen = false, ideaText = store.get('lc.ai.idea') ?? '', busyMsg = '';
+  const busyEl = h('div', { class: 'gbusy', role: 'status', 'aria-live': 'polite', hidden: true });
+  const busy = (m: string) => {
+    busyMsg = m; busyEl.hidden = !m;
+    busyEl.innerHTML = ''; if (m) busyEl.append(h('span', { class: 'spin' }), h('b', {}, m), h('small', {}, 'Usually 20 to 60 seconds. Keep this tab open.'));
+    host.querySelectorAll<HTMLButtonElement>('.aibtn').forEach((b) => { b.disabled = !!m; });
+  };
+  /** A paid AI action: shows the price, asks for credit when there is none. */
+  function aiButton(label: string, run: () => Promise<void>) {
+    const price = h('small', {}, '');
+    const b = h('button', { class: 'btn primary gbig aibtn', disabled: busyMsg ? true : undefined, onclick: () => { if (!busyMsg) void run(); } }, h('b', {}, label), price) as HTMLButtonElement;
+    void api.ai.maxCost().then((m) => { if (m) { const u = fmtUsd(m, api.ai.usd()); price.textContent = `up to ${fmtSats(m)}${u ? ` · ${u}` : ''}`; } });
+    return b;
+  }
+  function ideaForm() {
+    const ta = h('textarea', { class: 'aiinp', rows: 3, placeholder: 'A koi fish curling round a lotus, in teal, coral and gold', 'aria-label': 'Describe your idea', maxlength: 600 }) as HTMLTextAreaElement;
+    ta.value = ideaText;
+    ta.addEventListener('input', () => { ideaText = ta.value; store.set('lc.ai.idea', ta.value); });
+    return h('div', { class: 'gfield gidea' },
+      ta,
+      chips('Colours', [[5, '5'], [6, '6'], [7, '7'], [9, '9']], () => ([5, 6, 7, 9].includes(S.traceColours) ? S.traceColours : 6), (v) => { S.traceColours = v; }),
+      aiButton('Create picture', async () => {
+        const idea = ideaText.trim();
+        if (idea.length < 3) { api.toast('Describe your idea first'); ta.focus(); return; }
+        const url = await api.ai.create(IDEA_PROMPT(idea, S.traceColours), undefined, '3:4', () => busy('Drawing your idea…'));
+        if (url) {
+          api.projects.startNew();
+          const name = idea.split(/\s+/).slice(0, 4).join(' ').replace(/[^\p{L}\p{N} '-]/gu, '').slice(0, 40) || 'AI idea';
+          await api.usePicture(url, `${name}.png`);
+          api.setName(name.charAt(0).toUpperCase() + name.slice(1));
+          if (!S.traceFollow) { S.traceFollow = true; api.fitToArtwork(); api.changed(); }
+          busy(''); ideaOpen = false; go(1); return;
+        }
+        busy('');
+      }),
+      h('p', { class: 'note' }, `Made with ${api.ai.modelLabel()} in flat colours, ready to trace.`));
+  }
   const ago = (t: number) => {
     const m = Math.round((Date.now() - t) / 60000);
     if (m < 1) return 'just now'; if (m < 60) return `${m} min ago`;
@@ -104,9 +147,10 @@ export function createGuided(api: GuidedApi) {
           h('span', {}, h('b', {}, 'Try the Daruma demo'), h('small', {}, 'A trippy perseverance doll, ready to trace'))),
         h('button', { class: 'gcard', onclick: () => { api.projects.startNew(); api.pickPicture(); } },
           h('span', {}, h('b', {}, 'Use my own picture'), h('small', {}, 'PNG, JPEG or WebP. Flat colours work best'))),
-        h('div', { class: 'gcard off', 'aria-disabled': 'true' },
-          h('span', {}, h('b', {}, 'Describe an idea'), h('small', {}, 'AI creates the picture. Pay per use with Bitcoin, no account. Coming soon'))),
+        h('button', { class: 'gcard' + (ideaOpen ? ' on' : ''), 'aria-expanded': ideaOpen ? 'true' : 'false', onclick: () => { ideaOpen = !ideaOpen; draw(); } },
+          h('span', {}, h('b', {}, 'Describe an idea'), h('small', {}, 'AI draws it for you. Pay per use with Bitcoin, no account'))),
       ),
+      ...(ideaOpen ? [ideaForm()] : []),
     ] },
     { id: 'picture', label: 'Picture', view: 'stack', needsPicture: true, body: () => {
       const p = api.picture();
@@ -126,7 +170,15 @@ export function createGuided(api: GuidedApi) {
         h('h2', {}, 'Make it flat'),
         lead('Laser layers need flat colour areas. Shading, texture and photos trace badly.'),
         h('div', { class: 'gok' }, h('b', {}, 'Already flat colours?'), h('p', {}, 'Like the Daruma demo. Just press Next.')),
-        soon('Flatten with AI', 'One tap redraws your picture in flat, cut-ready colours. Pay per use with Bitcoin (Lightning or Cashu), no account.'),
+        h('div', { class: 'gfield' },
+          aiButton('Flatten with AI', async () => {
+            const p = api.picture();
+            const im = await new Promise<HTMLImageElement>((res) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => res(i); i.src = p.src; });
+            const url = await api.ai.create(api.redrawPrompt(), p.src, nearestAspect(im.naturalWidth || 3, im.naturalHeight || 4), () => busy('Redrawing in flat colours…'));
+            if (url) { await api.usePicture(url, `${(p.name || 'picture').replace(/\.[a-z]+$/i, '')}-flat.png`); api.toast('Flat redraw ready. Compare it with the trace, or press Next.'); }
+            busy('');
+          }),
+          h('p', { class: 'note' }, `Redraws your picture in ${S.traceColours} flat, cut-ready colours with ${api.ai.modelLabel()}. Pay per use with Bitcoin.`)),
         h('details', { class: 'gmore' }, h('summary', {}, 'Do it yourself now'),
           h('p', { class: 'note' }, 'Open Gemini, choose Nano Banana Pro, attach your picture and paste this prompt. Then choose the result as your picture.'),
           h('button', { class: 'btn small', onclick: copy }, 'Copy redraw prompt'),
@@ -183,7 +235,7 @@ export function createGuided(api: GuidedApi) {
 
   const content = h('div', { class: 'gbody' });
   const nav = h('div', { class: 'gnav' });
-  host.append(content, nav);
+  host.append(content, busyEl, nav);
 
   function drawBar() {
     bar.innerHTML = '';

@@ -15,6 +15,7 @@ import type { TraceOpts, TraceOut } from './trace';
 import { REDRAW_PROMPT, trace as traceNow } from './trace';
 import { allLayersSVG, download, exportZip, layerSVG, parseSVG, planSheets, simplify } from './svgio';
 import { createGuided, store } from './guided';
+import { createAiUi } from './aiui';
 import { deleteProject, getProject, listProjects, newId, saveProject } from './projects';
 
 // ---------------- materials ----------------
@@ -1230,8 +1231,15 @@ async function loadDemo() {
     await onTraceFile(f);
   } catch { toast('Could not load the demo picture'); }
 }
+const aiUi = createAiUi(h, toast);
+$('#mode').before(aiUi.badge);
 guided = createGuided({
-  S, h, toast,
+  S, h, toast, ai: aiUi,
+  usePicture: async (url: string, name: string) => {
+    const b = await (await fetch(url)).blob();
+    await onTraceFile(new File([b], name, { type: b.type || 'image/png' }));
+  },
+  setName: (n: string) => { projectName = n; $<HTMLInputElement>('#pname').value = n; },
   hasPicture: () => !!traceSrc && S.repeat === 'trace',
   picture: () => ({ src: traceSrc, name: traceName }),
   pickPicture: () => gFile.click(),

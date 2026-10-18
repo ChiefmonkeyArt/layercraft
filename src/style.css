@@ -279,3 +279,39 @@ body.guided .status .details { display: none; }
 .gproj small { color: var(--muted); font-size: var(--text-xs); }
 .gpdel { border: 0; background: transparent; color: var(--faint); font-size: 1.2rem; width: 32px; height: 32px; border-radius: 6px; cursor: pointer; }
 .gpdel:hover { color: var(--text); background: var(--bg); }
+/* AI credit */
+.aibadge { font-variant-numeric: tabular-nums; border-color: rgba(247, 147, 26, .45); color: #f7b25a; }
+.aisheet { width: min(440px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--text); }
+.aisheet::backdrop { background: rgba(0, 0, 0, .6); }
+.aihead { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+.aibody { padding: 14px 16px 18px; display: flex; flex-direction: column; gap: 10px; }
+.aibody .gbtns { display: flex; flex-wrap: wrap; gap: 8px; }
+.aistate { color: var(--muted); font-size: var(--text-sm); margin: 0; }
+.aistate.warn { color: #f0b46b; }
+.aipriv { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 4px; }
+.aisel, .aiinp { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; font: inherit; font-size: var(--text-sm); }
+textarea.aiinp { resize: vertical; font-family: ui-monospace, monospace; }
+.gidea textarea.aiinp { font-family: inherit; }
+.aiqr { align-self: center; width: 260px; height: 260px; border-radius: 10px; background: #fff; }
+.aicredit { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.aicredit b { font-size: 1.8rem; font-variant-numeric: tabular-nums; }
+.aicredit small, .aicredit span { color: var(--muted); }
+.aibtn { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.aibtn small { font-weight: 400; opacity: .85; font-size: var(--text-xs); }
+.gidea { display: flex; flex-direction: column; gap: 10px; }
+.gcard.on { border-color: rgba(255, 122, 61, .55); }
+.gbusy { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 16px; border-top: 1px solid var(--line); text-align: center; }
+.gbusy[hidden] { display: none; }
+.gbusy small { color: var(--muted); }
+.spin { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line); border-top-color: #ff7a3d; animation: lcspin .9s linear infinite; }
+@keyframes lcspin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation-duration: 3s; } }
+a.btn { text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
+.aibadge { margin-left: auto; }
+.aibadge + .modebtn { margin-left: 0; }
+body:not(.guided) .aibadge { order: 8; }
+@media (max-width: 640px) {
+  body.guided .top { flex-wrap: nowrap; }
+  .top .brand .tag { display: none; }
+  .aibadge, .modebtn { padding: 7px 10px; font-size: var(--text-xs); white-space: nowrap; }
+}
