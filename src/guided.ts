@@ -18,6 +18,7 @@ export interface GuidedApi {
   toast: (m: string) => void;
   hasPicture: () => boolean;
   picture: () => { src: string; name: string };
+  pictureInfo: () => { colours: number; shaded: boolean; plainBg: boolean; found: { hex: string; share: number }[] } | null;
   pickPicture: () => void;
   loadDemo: () => Promise<void>;
   traced: () => { sheets: number; pieces: number } | null;
@@ -159,6 +160,15 @@ export function createGuided(api: GuidedApi) {
         lead('This is what the layers are made from. The preview shows the first trace.'),
         h('figure', { class: 'gpic' }, h('img', { src: p.src, alt: p.name || 'Your picture' }), h('figcaption', {}, p.name || 'Picture')),
         h('div', { class: 'gbtns' }, h('button', { class: 'btn', onclick: () => api.pickPicture() }, 'Choose a different picture')),
+        ...(() => {
+          const info = api.pictureInfo();
+          if (!info) return [];
+          if (info.shaded) return [h('div', { class: 'gok warn' }, h('b', {}, 'This picture has shading or lots of colours'), h('p', {}, 'Laser layers need flat colours. The Flatten step can redraw it for you first.'))];
+          const sw = h('div', { class: 'gswatches', 'aria-label': 'Colours found' });
+          for (const f of info.found) sw.append(h('i', { style: `background:${f.hex}`, title: f.hex }));
+          return [h('div', { class: 'gfield' }, h('div', { class: 'glab' }, `Found ${info.colours} flat colours`), sw,
+            h('p', { class: 'note' }, info.plainBg ? 'The plain background is left out and the outline follows your artwork. Each other colour becomes a sheet.' : 'Each colour becomes a sheet.'))];
+        })(),
       ];
     } },
     { id: 'flat', label: 'Flatten', view: 'stack', needsPicture: true, body: () => {
@@ -188,7 +198,14 @@ export function createGuided(api: GuidedApi) {
     { id: 'trace', label: 'Trace', view: 'stack', needsPicture: true, body: () => [
       h('h2', {}, 'Trace and outline'),
       lead('Pick how many colours to find. Each colour becomes one sheet.'),
-      chips('Colours', [[5, '5'], [7, '7'], [9, '9'], [12, '12']], () => S.traceColours, (v) => { S.traceColours = v; api.changed(true); }),
+      (() => {
+        const info = api.pictureInfo();
+        const opts: [number, string, string?][] = [];
+        if (info && !info.shaded) opts.push([info.colours, `${info.colours}`, 'as found']);
+        for (const n of [5, 7, 9, 12]) if (!opts.some((o) => o[0] === n)) opts.push([n, String(n)]);
+        opts.sort((a, b) => a[0] - b[0]);
+        return chips('Colours', opts, () => S.traceColours, (v) => { S.traceColours = v; api.changed(true); });
+      })(),
       chips('Edges', [[0.9, 'Soft', 'flowing curves'], [0.45, 'Crisp', 'more detail']], () => (S.traceSmooth >= 0.55 ? 0.9 : 0.45), (v) => { S.traceSmooth = v; api.changed(); }),
       chips('Outline', [['follow', 'Follow the picture', 'background removed'], ['rect', 'Rectangle'], ['circle', 'Circle']],
         () => (S.traceFollow ? 'follow' : S.shape === 'circle' ? 'circle' : 'rect'),

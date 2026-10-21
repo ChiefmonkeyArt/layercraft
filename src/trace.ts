@@ -544,3 +544,56 @@ function labToRgb([l, a, b]: number[]): [number, number, number] {
 
 /** Prompt for an image AI (Nano Banana Pro / Gemini) to redraw a picture as flat colours first. */
 export const REDRAW_PROMPT = (n: number) => `Redraw the attached image as a flat colour-separation drawing for multi-layer laser cutting. Straight-on front view, same composition, every shape in the same place - do not redesign. Use exactly ${n} flat colours: no shading, gradients, texture, glow or shadows. Every edge a smooth, flowing, organic curve with crisp edges - no jagged edges, specks or noise. Do not outline colour areas with thin black lines; neighbouring colours touch directly. Plain flat background outside the artwork.`;
+
+/**
+ * Look at a picture before tracing: how many flat colours it really has (background included),
+ * how much of it is flat colour at all, and whether it sits on a plain background.
+ * Only "flat" pixels count (all 8 neighbours nearly the same), so anti-aliased edges and
+ * gradients don't add colours.
+ */
+export function analysePicture(img: TraceImage): { colours: number; flat: number; plainBg: boolean; found: { hex: string; share: number }[] } {
+  const { w, h, data } = img, N = w * h;
+  const Lb = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) { const c = lab(data[i * 4], data[i * 4 + 1], data[i * 4 + 2]); Lb[i * 3] = c[0]; Lb[i * 3 + 1] = c[1]; Lb[i * 3 + 2] = c[2]; }
+  const d2 = (i: number, j: number) => (Lb[i * 3] - Lb[j * 3]) ** 2 + (Lb[i * 3 + 1] - Lb[j * 3 + 1]) ** 2 + (Lb[i * 3 + 2] - Lb[j * 3 + 2]) ** 2;
+  // histogram of flat pixels in coarse Lab bins
+  const bins = new Map<number, { n: number; l: number; a: number; b: number }>();
+  let flatN = 0, opaque = 0;
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    if (data[i * 4 + 3] < 128) continue;
+    opaque++;
+    let flat = true;
+    for (const q of [i - 1, i + 1, i - w, i + w]) if (d2(i, q) > 5 * 5) { flat = false; break; }
+    if (!flat) continue;
+    flatN++;
+    const l = Lb[i * 3], a = Lb[i * 3 + 1], b = Lb[i * 3 + 2];
+    const k = (Math.round(l / 4) * 64 + Math.round(a / 4) + 32) * 64 + Math.round(b / 4) + 32;
+    const e = bins.get(k); if (e) { e.n++; e.l += l; e.a += a; e.b += b; } else bins.set(k, { n: 1, l, a, b });
+  }
+  // greedy peaks: biggest bins first; anything within ΔE 14 joins an existing colour
+  const peaks: { n: number; c: number[] }[] = [];
+  for (const e of [...bins.values()].sort((p, q) => q.n - p.n)) {
+    const c = [e.l / e.n, e.a / e.n, e.b / e.n];
+    const near = peaks.find((p) => (p.c[0] - c[0]) ** 2 + (p.c[1] - c[1]) ** 2 + (p.c[2] - c[2]) ** 2 < 12 * 12);
+    if (near) near.n += e.n; else peaks.push({ n: e.n, c });
+  }
+  const found = peaks.slice(0, 20).map((p) => { const [r, g, b] = labToRgb(p.c); return { hex: hex(r, g, b), share: +(p.n * 100 / Math.max(1, flatN)).toFixed(2) }; });
+  // plain background: most of the picture's edge is one flat colour
+  const edge: number[] = [];
+  for (let x = 0; x < w; x += 2) edge.push(x, (h - 1) * w + x);
+  for (let y = 0; y < h; y += 2) edge.push(y * w, y * w + w - 1);
+  let same = 0; const ref = edge[0];
+  // compare against the median-ish corner colour: pick the edge pixel most others match
+  let bestRef = ref, bestCount = -1;
+  for (const cand of [edge[0], edge[1], edge[Math.floor(edge.length / 2)], edge[edge.length - 1]]) {
+    let n = 0; for (const q of edge) if (d2(cand, q) < 10 * 10) n++;
+    if (n > bestCount) { bestCount = n; bestRef = cand; }
+  }
+  for (const q of edge) if (d2(bestRef, q) < 10 * 10) same++;
+  const plainBg = same / edge.length > 0.9;
+  // small colours count against the artwork, not the background around it
+  const art = Math.max(1, flatN - (plainBg && peaks[0] ? peaks[0].n : 0));
+  const colours = peaks.filter((p, i) => (plainBg && i === 0) || p.n >= Math.max(20, art * 0.0025)).length;
+  return { colours: Math.max(2, Math.min(16, colours)), flat: opaque ? flatN / opaque : 0, plainBg, found };
+}

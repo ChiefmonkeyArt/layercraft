@@ -315,3 +315,7 @@ body:not(.guided) .aibadge { order: 8; }
   .top .brand .tag { display: none; }
   .aibadge, .modebtn { padding: 7px 10px; font-size: var(--text-xs); white-space: nowrap; }
 }
+.gswatches { display: flex; flex-wrap: wrap; gap: 6px; }
+.gswatches i { width: 26px; height: 26px; border-radius: 6px; border: 1px solid rgba(255,255,255,.18); }
+.gok.warn { border-color: rgba(240, 180, 107, .45); display: block; }
+.gok.warn b { display: block; margin-bottom: 4px; }

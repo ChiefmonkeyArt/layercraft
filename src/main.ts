@@ -12,7 +12,7 @@ let Stack3DClass: typeof Stack3D | null = null;
 let loading3d = false;
 import { MOTIFS } from './motifs';
 import type { TraceOpts, TraceOut } from './trace';
-import { REDRAW_PROMPT, trace as traceNow } from './trace';
+import { REDRAW_PROMPT, analysePicture, trace as traceNow } from './trace';
 import { allLayersSVG, download, exportZip, layerSVG, parseSVG, planSheets, simplify } from './svgio';
 import { createGuided, store } from './guided';
 import { createAiUi } from './aiui';
@@ -61,6 +61,7 @@ const colourKey = () => (colourway === 'custom' ? `custom#${CUSTOM.version}` : c
 let view: 'stack' | '3d' | 'layers' | 'sketch' = 'stack';
 let guided: ReturnType<typeof createGuided> | null = null;
 let guidedOn = false;
+let pictureInfo: { colours: number; shaded: boolean; plainBg: boolean; found: { hex: string; share: number }[] } | null = null;
 let booted = false, touched = false; // autosave only once the user has changed something
 let projectId = '';
 let layerIdx = 0;
@@ -503,7 +504,7 @@ function autoCrop(im: HTMLImageElement): [number, number, number, number] {
   return [x0 / sc, y0 / sc, (x1 - x0 + 1) / sc, (y1 - y0 + 1) / sc];
 }
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024, MAX_IMAGE_PIXELS = 50e6, MAX_PROJECT_BYTES = 60 * 1024 * 1024;
-async function onTraceFile(f: File) {
+async function onTraceFile(f: File, demo = false) {
   try {
     if (f.size > MAX_IMAGE_BYTES) throw new Error('That picture is over 30 MB — save a smaller copy and try again');
     const url = await new Promise<string>((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.onerror = () => rej(new Error('Could not read that file')); r.readAsDataURL(f); });
@@ -518,14 +519,44 @@ async function onTraceFile(f: File) {
       c.getContext('2d')!.drawImage(im, 0, 0, c.width, c.height);
       try { src = c.toDataURL('image/png'); im = await loadImg(src); } catch { /* keep the original */ }
     }
+    // a new picture after the demo is a new project, not an edit of the Daruma
+    const wasDemo = !demo && traceName === 'trippy-daruma.webp';
+    if (wasDemo) startNew();
     traceSrc = src; traceName = f.name; traceImgEl = im;
     traceCrop = autoCrop(im);
+    if (wasDemo || projectName === 'Untitled stack') {
+      const base = f.name.replace(/\.[a-z0-9]+$/i, '').replace(/[-_]+/g, ' ').trim().slice(0, 40) || 'Untitled stack';
+      projectName = base; $<HTMLInputElement>('#pname').value = base;
+    }
+    // settings that suit this picture, not the previous one
+    const a = readPicture(im);
+    if (a) {
+      const shaded = pictureInfo!.shaded;
+      if (!demo) {
+        S.traceColours = shaded ? 9 : Math.max(2, Math.min(12, a.colours));
+        S.traceFollow = a.plainBg;
+        if (S.traceFollow && S.border > 6) S.border = 4; // a slim rim round a shaped piece, not a plate frame
+        syncAll();
+      }
+    }
     if (S.traceFollow) fitToArtwork();
     traceOrder = null; tracePalette = null; traceRes = null; traceKey = '';
     if (S.repeat !== 'trace') setRepeat('trace'); else buildPanel();
     schedule(0);
     guided?.pictureChosen();
   } catch (e: any) { toast(e.message || 'Could not read that image'); }
+}
+/** How many flat colours the picture has, and whether it has shading or a plain background. */
+function readPicture(im: HTMLImageElement) {
+  pictureInfo = null;
+  try {
+    const k = Math.min(1, 1000 / Math.max(im.naturalWidth, im.naturalHeight));
+    const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(im.naturalWidth * k)); c.height = Math.max(1, Math.round(im.naturalHeight * k));
+    const x = c.getContext('2d')!; x.drawImage(im, 0, 0, c.width, c.height);
+    const a = analysePicture({ w: c.width, h: c.height, data: x.getImageData(0, 0, c.width, c.height).data });
+    pictureInfo = { colours: Math.min(12, a.colours), shaded: a.colours > 12 || a.flat < 0.55, plainBg: a.plainBg, found: a.found.slice(0, a.colours) };
+    return a;
+  } catch { return null; } // the picture can't be read here: keep the current settings
 }
 /** Follow mode: keep the width, and set the height to the artwork's proportions. */
 function fitToArtwork() {
@@ -1094,12 +1125,13 @@ function applyProject(d: any) {
     sketch = d.sketch ?? []; sketchUndo.length = 0; if (sketch.length) sketchUndo.push(sketch.length);
     imported = d.imported ?? []; importName = d.importName ?? '';
     traceSrc = d.trace?.src ?? ''; traceName = d.trace?.name ?? ''; traceCrop = d.trace?.crop ?? null;
-    traceOrder = d.trace?.order ?? null; tracePalette = d.trace?.palette ?? null; traceRes = null; traceKey = ''; traceImgEl = null;
+    traceOrder = d.trace?.order ?? null; tracePalette = d.trace?.palette ?? null; traceRes = null; traceKey = ''; traceImgEl = null; pictureInfo = null;
     if (traceSrc && (typeof traceSrc !== 'string' || traceSrc.length > MAX_IMAGE_BYTES * 1.4 || !/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(traceSrc))) traceSrc = '';
     if (traceCrop && !(Array.isArray(traceCrop) && traceCrop.length === 4 && traceCrop.every((v) => typeof v === 'number' && isFinite(v)))) traceCrop = null;
     projectName = d.name ?? 'Untitled stack';
     $<HTMLInputElement>('#pname').value = projectName;
     buildPanel(); schedule(0);
+    if (traceSrc) { const src = traceSrc; void loadImg(src).then((im) => { if (traceSrc === src) { readPicture(im); guided?.refresh(); } }).catch(() => undefined); }
 }
 const slug = () => projectName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'stack';
 const projectData = () => ({ app: 'layercraft-stack', version: 2, name: projectName, settings: S, colourway, colours: { top: CUSTOM.top, bottom: CUSTOM.bottom, sheet: CUSTOM.sheet }, sketch, imported, importName, free, trace: traceSrc ? { src: traceSrc, name: traceName, crop: traceCrop, order: traceOrder, palette: tracePalette } : null });
@@ -1228,7 +1260,7 @@ async function loadDemo() {
     startNew();
     projectName = 'Trippy Daruma'; $<HTMLInputElement>('#pname').value = projectName;
     syncAll();
-    await onTraceFile(f);
+    await onTraceFile(f, true);
   } catch { toast('Could not load the demo picture'); }
 }
 const aiUi = createAiUi(h, toast);
@@ -1242,6 +1274,7 @@ guided = createGuided({
   setName: (n: string) => { projectName = n; $<HTMLInputElement>('#pname').value = n; },
   hasPicture: () => !!traceSrc && S.repeat === 'trace',
   picture: () => ({ src: traceSrc, name: traceName }),
+  pictureInfo: () => pictureInfo,
   pickPicture: () => gFile.click(),
   loadDemo,
   traced: () => (traceRes && result ? { sheets: result.layers.length, pieces: result.layers.reduce((a, l) => a + l.islands, 0) } : null),
