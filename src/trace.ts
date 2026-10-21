@@ -18,6 +18,7 @@ export interface TraceOpts {
   palette?: string[];       // reuse these colours instead of finding new ones
   follow?: boolean;         // the outer cut follows the artwork's silhouette (background removed)
   rimMm?: number;           // follow: solid rim around the silhouette, mm
+  merge?: number;           // colours closer than this (ΔE) are one ink; larger for photos of prints
 }
 export interface TraceOut {
   palette: string[];        // found colours (#rrggbb), in palette index order
@@ -309,9 +310,24 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
         const c = asg[j], x = j % sw;
         if (x > 0 && x < sw - 1 && j >= sw && j < sw * (sh - 1) && asg[j - 1] === c && asg[j + 1] === c && asg[j - sw] === c && asg[j + sw] === c) solid[c]++;
       }
-      let worst = 0; for (let c = 1; c < cent.length; c++) if (solid[c] < solid[worst]) worst = c;
+      // the cheapest colour to lose: few solid pixels AND close to another colour.
+      // A thin black outline has few pixels but nothing like it, so it stays;
+      // a light-grey copy of white (photo shading) is close to white, so it goes.
+      const near = cent.map((c, i) => { let m = Infinity; cent.forEach((q, j) => { if (j !== i) m = Math.min(m, (c[0] - q[0]) ** 2 + (c[1] - q[1]) ** 2 + (c[2] - q[2]) ** 2); }); return m; });
+      const cost = (c: number) => (solid[c] + 1) * Math.min(near[c], 60 * 60);
+      let worst = 0; for (let c = 1; c < cent.length; c++) if (cost(c) < cost(worst)) worst = c;
       cent.splice(worst, 1);
       run(3);
+    }
+    // colours that are really the same ink (shading, print or photo noise) become one
+    for (;;) {
+      let bi = -1, bj = -1, bd = (o.merge ?? 11) ** 2;
+      for (let i = 0; i < cent.length; i++) for (let j = i + 1; j < cent.length; j++) {
+        const d = (cent[i][0] - cent[j][0]) ** 2 + (cent[i][1] - cent[j][1]) ** 2 + (cent[i][2] - cent[j][2]) ** 2;
+        if (d < bd) { bd = d; bi = i; bj = j; }
+      }
+      if (bi < 0 || cent.length <= 2) break;
+      cent.splice(bj, 1); run(3);
     }
     cent = cent.map((c) => [c[0] / 0.8, c[1], c[2]]);
   }

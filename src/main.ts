@@ -476,7 +476,7 @@ function traceArea() {
 function traceOpts(): TraceOpts {
   const [wm, hm] = traceArea();
   return { colours: S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening,
-    widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined };
+    widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded ? 16 : 11, darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined };
 }
 const traceKeyOf = (o: TraceOpts) => JSON.stringify([o, traceSrc.length, traceSrc.slice(-64), traceCrop]);
 
@@ -501,6 +501,9 @@ function autoCrop(im: HTMLImageElement): [number, number, number, number] {
     if (Math.abs(q[0] - bg[0]) + Math.abs(q[1] - bg[1]) + Math.abs(q[2] - bg[2]) > 60) { if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py; }
   }
   if (x1 - x0 < w * 0.2 || y1 - y0 < hh * 0.2) return [0, 0, im.naturalWidth, im.naturalHeight];
+  // keep a little background all round, so a follow outline can tell artwork from background
+  const m = Math.round(Math.max(x1 - x0, y1 - y0) * 0.02) + 2;
+  x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(w - 1, x1 + m); y1 = Math.min(hh - 1, y1 + m);
   return [x0 / sc, y0 / sc, (x1 - x0 + 1) / sc, (y1 - y0 + 1) / sc];
 }
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024, MAX_IMAGE_PIXELS = 50e6, MAX_PROJECT_BYTES = 60 * 1024 * 1024;
@@ -579,9 +582,12 @@ async function traceImage(o: TraceOpts) {
   const sc = o.follow ? Math.min(w / cw, hh / ch) * 0.97 : Math.max(w / cw, hh / ch);
   const dw = cw * sc, dh = ch * sc;
   if (o.follow) {
-    const t = document.createElement('canvas'); t.width = t.height = 1;
-    const tx = t.getContext('2d')!; tx.drawImage(im, 0, 0, 1, 1, 0, 0, 1, 1);
-    const [r, g, b] = tx.getImageData(0, 0, 1, 1).data;
+    // the background colour: the median round the picture's edge (one corner pixel can be a stray)
+    const t = document.createElement('canvas'); t.width = t.height = 64;
+    const tx = t.getContext('2d')!; tx.drawImage(im, cx, cy, cw, ch, 0, 0, 64, 64);
+    const td = tx.getImageData(0, 0, 64, 64).data, ch3: number[][] = [[], [], []];
+    for (let i = 0; i < 64; i++) for (const q of [i, 63 * 64 + i, i * 64, i * 64 + 63]) for (let k = 0; k < 3; k++) ch3[k].push(td[q * 4 + k]);
+    const [r, g, b] = ch3.map((v) => v.sort((p, q) => p - q)[v.length >> 1]);
     x.fillStyle = `rgb(${r},${g},${b})`; x.fillRect(0, 0, w, hh);
   }
   x.imageSmoothingQuality = 'high';
