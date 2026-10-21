@@ -2,7 +2,7 @@
 // controls that step needs. Everything else lives in Advanced (the full app).
 import type { Settings } from './engine';
 import type { AiUi } from './aiui';
-import { IDEA_PROMPT, fmtSats, fmtUsd } from './ai';
+import { IDEA_PROMPT, fmtSats, fmtUsd, type PictureCheck } from './ai';
 import { nearestAspect } from './aiui';
 
 /** localStorage that never throws (sandboxed frames and private modes can block it). */
@@ -19,6 +19,8 @@ export interface GuidedApi {
   hasPicture: () => boolean;
   picture: () => { src: string; name: string };
   pictureInfo: () => { colours: number; shaded: boolean; plainBg: boolean; found: { hex: string; share: number }[] } | null;
+  pictureCheck: () => PictureCheck | null;
+  applyCheck: (c: PictureCheck) => void;
   pickPicture: () => void;
   loadDemo: () => Promise<void>;
   traced: () => { sheets: number; pieces: number } | null;
@@ -81,11 +83,34 @@ export function createGuided(api: GuidedApi) {
     host.querySelectorAll<HTMLButtonElement>('.aibtn').forEach((b) => { b.disabled = !!m; });
   };
   /** A paid AI action: shows the price, asks for credit when there is none. */
-  function aiButton(label: string, run: () => Promise<void>) {
+  function aiButton(label: string, run: () => Promise<void>, cost: () => Promise<number | null> = api.ai.maxCost, cls = 'primary') {
     const price = h('small', {}, '');
-    const b = h('button', { class: 'btn primary gbig aibtn', disabled: busyMsg ? true : undefined, onclick: () => { if (!busyMsg) void run(); } }, h('b', {}, label), price) as HTMLButtonElement;
-    void api.ai.maxCost().then((m) => { if (m) { const u = fmtUsd(m, api.ai.usd()); price.textContent = `up to ${fmtSats(m)}${u ? ` · ${u}` : ''}`; } });
+    const b = h('button', { class: `btn ${cls} gbig aibtn`, disabled: busyMsg ? true : undefined, onclick: () => { if (!busyMsg) void run(); } }, h('b', {}, label), price) as HTMLButtonElement;
+    void cost().then((m) => { if (m) { const u = fmtUsd(m, api.ai.usd()); price.textContent = `up to ${fmtSats(m)}${u ? ` · ${u}` : ''}`; } });
     return b;
+  }
+  /** The AI picture check: a vision model reads the shapes and inks, ignoring light and shade. */
+  function checkCard() {
+    const c = api.pictureCheck();
+    const run = async () => {
+      const r = await api.ai.check(api.picture().src, () => busy('Reading the shapes and colours…'));
+      busy('');
+      if (r) { api.applyCheck(r); api.toast(`AI check: ${r.inks.length} inks. Settings applied.`); draw(); }
+    };
+    if (!c) return h('div', { class: 'gfield gcheck' },
+      h('div', { class: 'glab' }, 'Check with AI'),
+      h('p', { class: 'note' }, 'An AI looks at the overall shapes, ignores light, shade and texture, and sets the colours, background and layer order for you.'),
+      aiButton('Check picture with AI', run, api.ai.visionCost, 'gcheckbtn'));
+    const sw = h('div', { class: 'gswatches gnamed', 'aria-label': 'Inks the AI found' });
+    for (const k of c.inks) sw.append(h('span', { class: 'gink' }, h('i', { style: `background:${k.hex}` }), h('small', {}, k.name || k.hex)));
+    return h('div', { class: 'gok gcheck' },
+      h('b', {}, `AI check: ${c.inks.length} inks${c.kind ? ` · ${c.kind}` : ''}`),
+      sw,
+      c.shapes ? h('p', {}, c.shapes) : null,
+      c.text ? h('p', {}, `Lettering: “${c.text}”${c.font ? ` in a ${c.font} style` : ''}.`) : null,
+      h('p', {}, 'Applied: colour count, background and layer order (top to back). Change any of them on the Trace and Layers steps.'),
+      h('div', { class: 'gbtns' }, h('button', { class: 'btn small', onclick: () => { api.applyCheck(c); api.toast('AI settings applied again'); } }, 'Apply again'),
+        aiButton('Check again', run, api.ai.visionCost, 'small ghost')));
   }
   function ideaForm() {
     const ta = h('textarea', { class: 'aiinp', rows: 3, placeholder: 'A koi fish curling round a lotus, in teal, coral and gold', 'aria-label': 'Describe your idea', maxlength: 600 }) as HTMLTextAreaElement;
@@ -163,12 +188,13 @@ export function createGuided(api: GuidedApi) {
         ...(() => {
           const info = api.pictureInfo();
           if (!info) return [];
-          if (info.shaded) return [h('div', { class: 'gok warn' }, h('b', {}, 'This picture has shading or lots of colours'), h('p', {}, 'Laser layers need flat colours. The Flatten step can redraw it for you first.'))];
+          if (info.shaded) return api.pictureCheck() ? [] : [h('div', { class: 'gok warn' }, h('b', {}, 'This picture has shading or lots of colours'), h('p', {}, 'Check it with AI below, or let the Flatten step redraw it in flat colours first.'))];
           const sw = h('div', { class: 'gswatches', 'aria-label': 'Colours found' });
           for (const f of info.found) sw.append(h('i', { style: `background:${f.hex}`, title: f.hex }));
           return [h('div', { class: 'gfield' }, h('div', { class: 'glab' }, `Found ${info.colours} flat colours`), sw,
             h('p', { class: 'note' }, info.plainBg ? 'The plain background is left out and the outline follows your artwork. Each other colour becomes a sheet.' : 'Each colour becomes a sheet.'))];
         })(),
+        checkCard(),
       ];
     } },
     { id: 'flat', label: 'Flatten', view: 'stack', needsPicture: true, body: () => {

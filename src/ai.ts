@@ -186,3 +186,68 @@ export async function shrinkForUpload(src: string, long = 1024): Promise<string>
 }
 
 export const IDEA_PROMPT = (idea: string, n: number) => `Create artwork for a multi-layer laser-cut wooden piece: ${idea.trim()}. Straight-on front view, one bold centred subject that fills the frame, on a plain flat white background. Use exactly ${n} flat colours: no shading, gradients, texture, glow or shadows. Every edge a smooth, flowing, organic curve with crisp edges - no jagged edges, specks, thin hairlines or noise. Neighbouring colours touch directly; shapes large enough to cut from 3 mm plywood. No text unless asked for.`;
+
+// ---------------- picture check (a cheap vision model reads the picture) ----------------
+/** Vision models to try, cheapest good one first. */
+export const VISION_MODELS = ['gpt-4o-mini', 'gemini-2.5-flash-lite', 'gemma-3-27b-it', 'gpt-4.1-mini'];
+export interface PictureCheck {
+  kind: string;                 // e.g. "flat digital art", "photo of a layered piece"
+  photo: boolean;               // shading, lighting or texture from a camera
+  background: string | null;    // #rrggbb, or null if the artwork fills the picture
+  plainBackground: boolean;
+  inks: { hex: string; name: string; role: string }[]; // the artwork's flat colours, outermost first
+  stack: string[];              // the same inks from the top (nearest the viewer) to the back
+  text: string;                 // any lettering, exactly as written
+  font: string;                 // closest well-known typeface for the lettering
+  shapes: string;               // one sentence on the overall shapes
+}
+export const CHECK_PROMPT = `You are preparing a picture for multi-layer laser cutting, where every flat colour becomes one cut sheet. Look at the overall shapes, not pixel noise: ignore shading, lighting, shadows between layers, paper or wood texture and camera blur - they are not colours. Reply with JSON only, no prose, in exactly this shape:
+{"kind": "short description, e.g. flat digital art / photo of a layered piece / photo / drawing",
+ "photo": true or false (true if it is a camera photo with lighting or shading),
+ "background": "#rrggbb of the plain background around the artwork, or null if the artwork fills the picture",
+ "plainBackground": true or false,
+ "inks": [{"hex": "#rrggbb", "name": "plain colour name", "role": "outline | band | shape | text | detail"}],
+ "stack": ["#rrggbb", ...],
+ "text": "any lettering exactly as written, or empty",
+ "font": "closest well-known typeface for the lettering, e.g. Cooper Black, or empty",
+ "shapes": "one sentence on the overall shapes, e.g. concentric rounded bands around three lines of bold text"}
+Rules: inks are the distinct flat paint or material colours of the artwork only (not the background, not shadows), listed from the outermost to the innermost; if the background colour is reused inside the artwork (for example white letters on a white background) include it as an ink too. Give each ink its true clean colour as printed, not the shaded colour in the photo. stack lists the same hex values from the layer nearest the viewer (raised highest) to the back layer, as the piece would be built from stacked sheets. Never more than 12 inks.`;
+
+/** Which vision model this node offers, and its most it can cost. */
+export async function visionOffer(node: string): Promise<{ model: string; maxSats: number } | null> {
+  try {
+    const j = await (await timed(`${node}/v1/models`, {}, 8000)).json();
+    const list = (j.data ?? j) as any[];
+    for (const id of VISION_MODELS) {
+      const m = list.find((x) => x?.id === id && x.enabled !== false);
+      const max = Number(m?.sats_pricing?.max_cost);
+      if (m && isFinite(max) && max > 0) return { model: id, maxSats: Math.ceil(max) };
+    }
+  } catch { /* offline */ }
+  return null;
+}
+
+const HEX = /^#[0-9a-f]{6}$/i;
+/** Ask the vision model about the picture. */
+export async function checkPicture(s: Session, model: string, img: string): Promise<PictureCheck> {
+  const j = await json(await timed(`${s.node}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
+    body: JSON.stringify({ model, temperature: 0, max_tokens: 900, stream: false,
+      messages: [{ role: 'user', content: [{ type: 'text', text: CHECK_PROMPT }, { type: 'image_url', image_url: { url: img } }] }] }),
+  }, 90000));
+  const c = j?.choices?.[0]?.message?.content;
+  const t = typeof c === 'string' ? c : Array.isArray(c) ? c.map((x: any) => x?.text ?? '').join('') : '';
+  const m = t.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error('The AI did not describe the picture. Try again.');
+  let r: any; try { r = JSON.parse(m[0]); } catch { throw new Error('The AI reply could not be read. Try again.'); }
+  const inks = (Array.isArray(r.inks) ? r.inks : []).filter((k: any) => HEX.test(k?.hex)).slice(0, 12)
+    .map((k: any) => ({ hex: String(k.hex).toLowerCase(), name: String(k.name ?? '').slice(0, 30), role: String(k.role ?? '').slice(0, 20) }));
+  if (inks.length < 2) throw new Error('The AI found fewer than two colours. Try again.');
+  const stack = (Array.isArray(r.stack) ? r.stack : []).map((x: any) => String(x).toLowerCase()).filter((x: string) => HEX.test(x));
+  return {
+    kind: String(r.kind ?? '').slice(0, 80), photo: !!r.photo,
+    background: HEX.test(r.background) ? String(r.background).toLowerCase() : null, plainBackground: !!r.plainBackground,
+    inks, stack: stack.length ? stack : inks.map((k: any) => k.hex),
+    text: String(r.text ?? '').slice(0, 200), font: String(r.font ?? '').slice(0, 60), shapes: String(r.shapes ?? '').slice(0, 200),
+  };
+}

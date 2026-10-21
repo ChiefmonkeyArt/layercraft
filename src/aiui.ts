@@ -3,6 +3,7 @@ import QRCode from 'qrcode';
 import {
   MODELS, NodeOffer, Session, balance, btcUsd, createInvoice, findOffers, fmtSats, fmtUsd, generateImage, getSession,
   invoiceStatus, parseSessionCode, redeemCashu, refund, sessionCode, setSession, shrinkForUpload, topupCashu,
+  checkPicture, visionOffer, type PictureCheck,
 } from './ai';
 import { store } from './guided';
 import { hasSigner, pullSession, pushSession } from './nostrsync';
@@ -243,11 +244,38 @@ export function createAiUi(h: H, toast: (m: string) => void) {
     }
   }
 
+  /** Check the picture with a vision model; asks for credit first if there is none. */
+  let vis: { node: string; model: string; maxSats: number } | null = null;
+  const visionCost = async () => {
+    const s = getSession(), node = s?.node ?? (offers[0] ?? offer)?.url;
+    if (!node) { try { await loadOffers(); } catch { /* offline */ } }
+    const n = s?.node ?? (offer ?? offers[0])?.url; if (!n) return null;
+    if (!vis || vis.node !== n) { const v = await visionOffer(n); vis = v ? { node: n, ...v } : null; }
+    return vis?.maxSats ?? null;
+  };
+  async function check(ref: string, onStart: () => void): Promise<PictureCheck | null> {
+    const s = getSession();
+    if (!s) { open(() => toast('Credit added. Press Check again.')); return null; }
+    await visionCost();
+    if (!vis) { toast('This AI node has no picture-reading model right now. Try again later.'); return null; }
+    onStart();
+    try {
+      const r = await checkPicture(s, vis.model, await shrinkForUpload(ref, 1024));
+      void refreshCredit();
+      return r;
+    } catch (e: any) {
+      void refreshCredit();
+      if (e?.status === 402 || /balance|insufficient/i.test(e?.message ?? '')) { toast('Not enough credit. Top up to continue.'); open(); }
+      else toast(`The AI could not check it: ${e.message}`);
+      return null;
+    }
+  }
+
   const modelLabel = () => MODELS.find((m) => m.id === model)?.label ?? model;
   const maxCost = async () => { if (!offers.length) { try { await loadOffers(); } catch { /* offline */ } } const s = getSession(); return (offers.find((o) => o.url === s?.node) ?? offer)?.maxSats ?? null; };
 
   if (getSession()) void refreshCredit(); else drawBadge();
   void btcUsd().then((v) => { usd = v; });
-  return { badge, open, create, refreshCredit, credit: () => credit, usd: () => usd, hasSession: () => !!getSession(), onChange: (f: () => void) => listeners.add(f), modelLabel, maxCost };
+  return { badge, open, create, check, visionCost, refreshCredit, credit: () => credit, usd: () => usd, hasSession: () => !!getSession(), onChange: (f: () => void) => listeners.add(f), modelLabel, maxCost };
 }
 export type AiUi = ReturnType<typeof createAiUi>;

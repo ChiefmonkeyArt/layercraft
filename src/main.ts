@@ -12,7 +12,8 @@ let Stack3DClass: typeof Stack3D | null = null;
 let loading3d = false;
 import { MOTIFS } from './motifs';
 import type { TraceOpts, TraceOut } from './trace';
-import { REDRAW_PROMPT, analysePicture, trace as traceNow } from './trace';
+import { REDRAW_PROMPT, analysePicture, hexDist, trace as traceNow } from './trace';
+import type { PictureCheck } from './ai';
 import { allLayersSVG, download, exportZip, layerSVG, parseSVG, planSheets, simplify } from './svgio';
 import { createGuided, store } from './guided';
 import { createAiUi } from './aiui';
@@ -61,6 +62,8 @@ const colourKey = () => (colourway === 'custom' ? `custom#${CUSTOM.version}` : c
 let view: 'stack' | '3d' | 'layers' | 'sketch' = 'stack';
 let guided: ReturnType<typeof createGuided> | null = null;
 let guidedOn = false;
+let pictureCheck: PictureCheck | null = null; // what the AI picture check said about this picture
+let checkOrderPending = false; // apply the AI's layer order after the next trace
 let pictureInfo: { colours: number; shaded: boolean; plainBg: boolean; found: { hex: string; share: number }[] } | null = null;
 let booted = false, touched = false; // autosave only once the user has changed something
 let projectId = '';
@@ -476,7 +479,7 @@ function traceArea() {
 function traceOpts(): TraceOpts {
   const [wm, hm] = traceArea();
   return { colours: S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening,
-    widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded ? 16 : 11, fair: S.traceSmooth * 2, darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined };
+    widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded || pictureCheck?.photo ? 16 : 11, fair: S.traceSmooth * 2, darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined };
 }
 const traceKeyOf = (o: TraceOpts) => JSON.stringify([o, traceSrc.length, traceSrc.slice(-64), traceCrop]);
 
@@ -525,7 +528,7 @@ async function onTraceFile(f: File, demo = false) {
     // a new picture after the demo is a new project, not an edit of the Daruma
     const wasDemo = !demo && traceName === 'trippy-daruma.webp';
     if (wasDemo) startNew();
-    traceSrc = src; traceName = f.name; traceImgEl = im;
+    traceSrc = src; traceName = f.name; traceImgEl = im; pictureCheck = null; checkOrderPending = false;
     traceCrop = autoCrop(im);
     if (wasDemo || projectName === 'Untitled stack') {
       const base = f.name.replace(/\.[a-z0-9]+$/i, '').replace(/[-_]+/g, ' ').trim().slice(0, 40) || 'Untitled stack';
@@ -548,6 +551,33 @@ async function onTraceFile(f: File, demo = false) {
     schedule(0);
     guided?.pictureChosen();
   } catch (e: any) { toast(e.message || 'Could not read that image'); }
+}
+/** The AI's stacking (top to back, as colours) mapped onto the traced colours. */
+function stackOrder(out: TraceOut, stack: string[]): number[] | null {
+  const live = out.order;
+  const pairs: [number, number, number][] = [];
+  stack.forEach((hx, si) => live.forEach((c) => pairs.push([hexDist(hx, out.palette[c]), si, c])));
+  pairs.sort((a, b) => a[0] - b[0]);
+  const bySlot = new Map<number, number>(), used = new Set<number>();
+  for (const [d, si, c] of pairs) { if (d > 45 || bySlot.has(si) || used.has(c)) continue; bySlot.set(si, c); used.add(c); }
+  if (bySlot.size < 2) return null;
+  const ord = [...bySlot.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]);
+  // colours the AI did not name keep their place next to the colour traced just above them
+  live.forEach((c, i) => {
+    if (used.has(c)) return;
+    let at = 0; for (let j = i - 1; j >= 0; j--) { const k = ord.indexOf(live[j]); if (k >= 0) { at = k + 1; break; } }
+    ord.splice(at, 0, c); used.add(c);
+  });
+  return ord;
+}
+/** Use what the AI check found: how many colours, the background, the layer order. */
+function applyCheck(c: PictureCheck) {
+  pictureCheck = c;
+  const bgReused = !!c.background && c.inks.some((k) => hexDist(k.hex, c.background!) < 12);
+  S.traceColours = Math.max(2, Math.min(12, c.inks.length + (c.background && !bgReused ? 1 : 0)));
+  if (c.plainBackground) { S.traceFollow = true; if (S.border > 6) S.border = 4; fitToArtwork(); }
+  traceOrder = null; tracePalette = null; checkOrderPending = true;
+  syncAll(); schedule(0); autosave();
 }
 /** How many flat colours the picture has, and whether it has shading or a plain background. */
 function readPicture(im: HTMLImageElement) {
@@ -623,6 +653,14 @@ async function runTrace() {
     traceRes = out;
     tracePalette = out.palette;
     traceKey = traceKeyOf(traceOpts());
+    if (checkOrderPending && pictureCheck) {
+      checkOrderPending = false;
+      // a followed outline shows the top sheet as the rim, so the outermost ink stays on top as the frame
+      const st = pictureCheck.stack.slice(), outer = pictureCheck.inks[0]?.hex;
+      if (S.traceFollow && outer) { const i = st.indexOf(outer); if (i > 0) { st.splice(i, 1); st.unshift(outer); } }
+      const ord = stackOrder(out, st);
+      if (ord && ord.join() !== out.order.join()) traceOrder = ord; // the next schedule re-traces in this order
+    }
     applyTraceColours();
     setTraceMsg(`Traced ${out.order.length} colours into ${out.order.length} sheets in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
     drawTraceList();
@@ -1140,7 +1178,7 @@ function applyProject(d: any) {
     sketch = d.sketch ?? []; sketchUndo.length = 0; if (sketch.length) sketchUndo.push(sketch.length);
     imported = d.imported ?? []; importName = d.importName ?? '';
     traceSrc = d.trace?.src ?? ''; traceName = d.trace?.name ?? ''; traceCrop = d.trace?.crop ?? null;
-    traceOrder = d.trace?.order ?? null; tracePalette = d.trace?.palette ?? null; traceRes = null; traceKey = ''; traceImgEl = null; pictureInfo = null;
+    traceOrder = d.trace?.order ?? null; tracePalette = d.trace?.palette ?? null; traceRes = null; traceKey = ''; traceImgEl = null; pictureInfo = null; pictureCheck = d.trace?.check ?? null; checkOrderPending = false;
     if (traceSrc && (typeof traceSrc !== 'string' || traceSrc.length > MAX_IMAGE_BYTES * 1.4 || !/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(traceSrc))) traceSrc = '';
     if (traceCrop && !(Array.isArray(traceCrop) && traceCrop.length === 4 && traceCrop.every((v) => typeof v === 'number' && isFinite(v)))) traceCrop = null;
     projectName = d.name ?? 'Untitled stack';
@@ -1149,7 +1187,7 @@ function applyProject(d: any) {
     if (traceSrc) { const src = traceSrc; void loadImg(src).then((im) => { if (traceSrc === src) { readPicture(im); guided?.refresh(); } }).catch(() => undefined); }
 }
 const slug = () => projectName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'stack';
-const projectData = () => ({ app: 'layercraft-stack', version: 2, name: projectName, settings: S, colourway, colours: { top: CUSTOM.top, bottom: CUSTOM.bottom, sheet: CUSTOM.sheet }, sketch, imported, importName, free, trace: traceSrc ? { src: traceSrc, name: traceName, crop: traceCrop, order: traceOrder, palette: tracePalette } : null });
+const projectData = () => ({ app: 'layercraft-stack', version: 2, name: projectName, settings: S, colourway, colours: { top: CUSTOM.top, bottom: CUSTOM.bottom, sheet: CUSTOM.sheet }, sketch, imported, importName, free, trace: traceSrc ? { src: traceSrc, name: traceName, crop: traceCrop, order: traceOrder, palette: tracePalette, check: pictureCheck } : null });
 
 $('#pname').addEventListener('input', (e) => { projectName = (e.target as HTMLInputElement).value || 'Untitled stack'; touched = true; autosave(); });
 $('#save').addEventListener('click', () => download(new Blob([JSON.stringify(projectData())], { type: 'application/json' }), `${slug()}.layercraft.json`));
@@ -1290,6 +1328,8 @@ guided = createGuided({
   hasPicture: () => !!traceSrc && S.repeat === 'trace',
   picture: () => ({ src: traceSrc, name: traceName }),
   pictureInfo: () => pictureInfo,
+  pictureCheck: () => pictureCheck,
+  applyCheck,
   pickPicture: () => gFile.click(),
   loadDemo,
   traced: () => (traceRes && result ? { sheets: result.layers.length, pieces: result.layers.reduce((a, l) => a + l.islands, 0) } : null),
