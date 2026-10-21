@@ -45,7 +45,7 @@ export interface GuidedApi {
   };
   setAdvanced: (on: boolean) => void;
   ai: AiUi;
-  usePicture: (url: string, name: string) => Promise<void>;
+  usePicture: (url: string, name: string, sameArt?: boolean) => Promise<void>;
   setName: (n: string) => void;
 }
 
@@ -211,10 +211,16 @@ export function createGuided(api: GuidedApi) {
             const p = api.picture();
             const im = await new Promise<HTMLImageElement>((res) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => res(i); i.src = p.src; });
             const url = await api.ai.create(api.redrawPrompt(), p.src, nearestAspect(im.naturalWidth || 3, im.naturalHeight || 4), () => busy('Redrawing in flat colours…'));
-            if (url) { await api.usePicture(url, `${(p.name || 'picture').replace(/\.[a-z]+$/i, '')}-flat.png`); api.toast('Flat redraw ready. Compare it with the trace, or press Next.'); }
+            if (url) { await api.usePicture(url, `${(p.name || 'picture').replace(/\.[a-z]+$/i, '')}-flat.png`, true); api.toast('Flat redraw ready. Compare it with the trace, or press Next.'); }
             busy('');
           }),
-          h('p', { class: 'note' }, `Redraws your picture in ${S.traceColours} flat, cut-ready colours with ${api.ai.modelLabel()}. Pay per use with Bitcoin.`)),
+          (() => {
+            const c = api.pictureCheck();
+            if (!c) return h('p', { class: 'note' }, `Redraws your picture in ${S.traceColours} flat, cut-ready colours with ${api.ai.modelLabel()}. Pay per use with Bitcoin. Tip: run Check with AI on the Picture step first for a much more faithful redraw.`);
+            const sw = h('div', { class: 'gswatches gnamed' });
+            for (const k of c.inks) sw.append(h('span', { class: 'gink' }, h('i', { style: `background:${k.hex}` }), h('small', {}, k.name || k.hex)));
+            return h('div', {}, h('p', { class: 'note' }, `Uses the AI check: exactly these ${c.inks.length} inks${c.text ? ', the same lettering' : ''}, smooth even curves, no light or shade. With ${api.ai.modelLabel()}, pay per use with Bitcoin.`), sw);
+          })()),
         h('details', { class: 'gmore' }, h('summary', {}, 'Do it yourself now'),
           h('p', { class: 'note' }, 'Open Gemini, choose Nano Banana Pro, attach your picture and paste this prompt. Then choose the result as your picture.'),
           h('button', { class: 'btn small', onclick: copy }, 'Copy redraw prompt'),

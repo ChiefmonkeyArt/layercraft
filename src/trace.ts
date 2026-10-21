@@ -625,7 +625,23 @@ function labToRgb([l, a, b]: number[]): [number, number, number] {
 }
 
 /** Prompt for an image AI (Nano Banana Pro / Gemini) to redraw a picture as flat colours first. */
-export const REDRAW_PROMPT = (n: number) => `Redraw the attached image as a flat colour-separation drawing for multi-layer laser cutting. Straight-on front view, same composition, every shape in the same place - do not redesign. Use exactly ${n} flat colours: no shading, gradients, texture, glow or shadows. Every edge a smooth, flowing, organic curve with crisp edges - no jagged edges, specks or noise. Do not outline colour areas with thin black lines; neighbouring colours touch directly. Plain flat background outside the artwork.`;
+export interface RedrawHints { inks: { hex: string; name: string; role: string }[]; background: string | null; text: string; font: string; shapes: string }
+/** The prompt for an AI redraw in flat, cut-ready colours; much sharper when the AI picture check has run. */
+export const REDRAW_PROMPT = (n: number, c?: RedrawHints | null) => {
+  if (!c) return `Redraw the attached image as a flat colour-separation drawing for multi-layer laser cutting. Straight-on front view, same composition, every shape in the same place - do not redesign. Use exactly ${n} flat colours: no shading, gradients, texture, glow or shadows. Every edge a smooth, flowing, organic curve with crisp edges - no jagged edges, specks or noise. Do not outline colour areas with thin black lines; neighbouring colours touch directly. Plain flat background outside the artwork.`;
+  const inks = c.inks.map((k) => `${k.name || 'colour'} ${k.hex}${k.role ? ` (${k.role})` : ''}`).join(', ');
+  const hasOutline = c.inks.some((k) => /outline/i.test(k.role));
+  return [
+    'Redraw the attached image as clean flat vector-style artwork for multi-layer laser cutting. Straight-on front view, same composition and proportions, every shape in exactly the same place - do not redesign or restyle it.',
+    c.shapes ? `The artwork is: ${c.shapes}` : '',
+    `Use exactly these ${c.inks.length} flat colours and no others: ${inks}.`,
+    'Remove everything that comes from the camera or the material: lighting, shading, shadows between layers, reflections, texture, grain and blur.',
+    'Every edge must be a crisp, perfectly smooth curve. Rounded shapes stay perfectly rounded; bands that run alongside each other keep an even width all the way round, like clean offset paths. No jagged edges, wobbles, specks or noise.',
+    c.text ? `Keep the lettering exactly as written: "${c.text}"${c.font ? `, in a clean ${c.font} style` : ''}, same size, weight and position, with crisp letter shapes and clear gaps between letters.` : '',
+    hasOutline ? 'Keep the outline as one even, smooth band.' : 'Do not add thin black outlines; neighbouring colours touch directly.',
+    `Plain flat ${c.background ? c.background : 'white'} background outside the artwork.`,
+  ].filter(Boolean).join(' ');
+};
 
 /**
  * Look at a picture before tracing: how many flat colours it really has (background included),

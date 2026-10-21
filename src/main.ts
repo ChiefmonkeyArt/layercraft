@@ -510,7 +510,7 @@ function autoCrop(im: HTMLImageElement): [number, number, number, number] {
   return [x0 / sc, y0 / sc, (x1 - x0 + 1) / sc, (y1 - y0 + 1) / sc];
 }
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024, MAX_IMAGE_PIXELS = 50e6, MAX_PROJECT_BYTES = 60 * 1024 * 1024;
-async function onTraceFile(f: File, demo = false) {
+async function onTraceFile(f: File, demo = false, keepCheck: PictureCheck | null = null) {
   try {
     if (f.size > MAX_IMAGE_BYTES) throw new Error('That picture is over 30 MB — save a smaller copy and try again');
     const url = await new Promise<string>((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.onerror = () => rej(new Error('Could not read that file')); r.readAsDataURL(f); });
@@ -529,6 +529,7 @@ async function onTraceFile(f: File, demo = false) {
     const wasDemo = !demo && traceName === 'trippy-daruma.webp';
     if (wasDemo) startNew();
     traceSrc = src; traceName = f.name; traceImgEl = im; pictureCheck = null; checkOrderPending = false;
+    const carried = keepCheck ? { ...keepCheck, photo: false, kind: 'flat AI redraw' } : null;
     traceCrop = autoCrop(im);
     if (wasDemo || projectName === 'Untitled stack') {
       const base = f.name.replace(/\.[a-z0-9]+$/i, '').replace(/[-_]+/g, ' ').trim().slice(0, 40) || 'Untitled stack';
@@ -547,6 +548,7 @@ async function onTraceFile(f: File, demo = false) {
     }
     if (S.traceFollow) fitToArtwork();
     traceOrder = null; tracePalette = null; traceRes = null; traceKey = '';
+    if (carried) applyCheck(carried); // same artwork, now flat: keep the AI's colours and layer order
     if (S.repeat !== 'trace') setRepeat('trace'); else buildPanel();
     schedule(0);
     guided?.pictureChosen();
@@ -731,7 +733,7 @@ function traceControls(): Node[] {
     ? h('img', { class: 'tthumb', src: traceSrc, alt: traceName ? `Traced image: ${traceName}` : 'Traced image' })
     : h('button', { class: 'tthumb empty', onclick: () => fileIn.click() }, 'Choose a picture');
   const copy = async () => {
-    const txt = REDRAW_PROMPT(S.traceColours);
+    const txt = REDRAW_PROMPT(S.traceColours, pictureCheck);
     try { await navigator.clipboard.writeText(txt); toast('Prompt copied. Paste it into Gemini (Nano Banana Pro) with your picture.'); }
     catch { toast('Copy blocked here — select the prompt text below instead'); }
   };
@@ -746,7 +748,7 @@ function traceControls(): Node[] {
     traceStatus,
     h('details', { class: 'tprompt' }, h('summary', {}, 'Photo or shaded art? Redraw it first'),
       h('p', { class: 'note' }, 'Shading and texture trace badly. Open Gemini, choose Nano Banana Pro (the image model), attach your picture and paste this prompt. Then upload the result here.'),
-      h('textarea', { class: 'ptext', readonly: true, rows: 6 }, REDRAW_PROMPT(S.traceColours))),
+      h('textarea', { class: 'ptext', readonly: true, rows: 6 }, REDRAW_PROMPT(S.traceColours, pictureCheck))),
     slider('Colours (sheets)', () => S.traceColours, (v) => { S.traceColours = v; traceOrder = null; tracePalette = null; }, 3, 16, 1, '', 'How many flat colours to find; each one is a sheet'),
     slider('Smoothness', () => S.traceSmooth, (v) => (S.traceSmooth = v), 0, 2, 0.05, 'mm', 'Fairs every edge into smooth curves (corners stay sharp); higher loses fine detail'),
     slider('Smallest loose piece', () => S.traceMinPiece, (v) => (S.traceMinPiece = v), 2, 200, 1, 'mm²', 'Loose pieces smaller than this blend into the colour around them'),
@@ -1320,9 +1322,9 @@ const aiUi = createAiUi(h, toast);
 $('#mode').before(aiUi.badge);
 guided = createGuided({
   S, h, toast, ai: aiUi,
-  usePicture: async (url: string, name: string) => {
+  usePicture: async (url: string, name: string, sameArt = false) => {
     const b = await (await fetch(url)).blob();
-    await onTraceFile(new File([b], name, { type: b.type || 'image/png' }));
+    await onTraceFile(new File([b], name, { type: b.type || 'image/png' }), false, sameArt ? pictureCheck : null);
   },
   setName: (n: string) => { projectName = n; $<HTMLInputElement>('#pname').value = n; },
   hasPicture: () => !!traceSrc && S.repeat === 'trace',
@@ -1336,7 +1338,7 @@ guided = createGuided({
   traceStatus, traceList, drawTraceList,
   autoOrder: () => { traceOrder = null; schedule(0); },
   colourPanel,
-  redrawPrompt: () => REDRAW_PROMPT(S.traceColours),
+  redrawPrompt: () => REDRAW_PROMPT(S.traceColours, pictureCheck),
   setMaterial: (v) => { S.material = v; Object.assign(S, MATERIALS[v].s); },
   fitToArtwork,
   showView,
