@@ -52,8 +52,35 @@ function groupsD(groups: Group[], dx: number, dy: number): string {
 }
 function ringD(c: { x: number; y: number }[], dx: number, dy: number) {
   if (!c.length) return '';
-  let d = `M${f(c[0].x / SCALE + dx)} ${f(c[0].y / SCALE + dy)}`;
-  for (let i = 1; i < c.length; i++) d += `L${f(c[i].x / SCALE + dx)} ${f(c[i].y / SCALE + dy)}`;
+  const p = c.map((q) => [q.x / SCALE + dx, q.y / SCALE + dy] as Pt);
+  return curveRingD(p);
+}
+/**
+ * A closed ring as smooth cubic curves: Catmull-Rom through the points, with sharp corners
+ * and long straight edges kept as they are. Lasers cut these as true curves, not tiny steps.
+ */
+export function curveRingD(p: Pt[]): string {
+  const n = p.length;
+  const P = (q: Pt) => `${f(q[0])} ${f(q[1])}`;
+  if (n < 6) return 'M' + p.map(P).join('L') + 'Z';
+  const len = (a: Pt, b: Pt) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const sharp = p.map((b, i) => {
+    const a = p[(i - 1 + n) % n], c = p[(i + 1) % n];
+    const la = len(a, b), lc = len(b, c);
+    if (!la || !lc) return true;
+    const cos = ((b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1])) / (la * lc);
+    return cos < Math.cos((40 * Math.PI) / 180) || la > 4 * lc || lc > 4 * la;
+  });
+  let d = 'M' + P(p[0]);
+  for (let i = 0; i < n; i++) {
+    const p0 = p[(i - 1 + n) % n], p1 = p[i], p2 = p[(i + 1) % n], p3 = p[(i + 2) % n];
+    if (sharp[i] && sharp[(i + 1) % n]) { d += 'L' + P(p2); continue; }
+    // tangents scaled to the segment, so short and long neighbours do not overshoot
+    const l12 = len(p1, p2);
+    const t1 = sharp[i] ? [0, 0] : (() => { const l = len(p0, p2) || 1; return [((p2[0] - p0[0]) / l) * l12 / 3, ((p2[1] - p0[1]) / l) * l12 / 3]; })();
+    const t2 = sharp[(i + 1) % n] ? [0, 0] : (() => { const l = len(p1, p3) || 1; return [((p3[0] - p1[0]) / l) * l12 / 3, ((p3[1] - p1[1]) / l) * l12 / 3]; })();
+    d += `C${f(p1[0] + t1[0])} ${f(p1[1] + t1[1])} ${f(p2[0] - t2[0])} ${f(p2[1] - t2[1])} ${P(p2)}`;
+  }
   return d + 'Z';
 }
 const linesD = (ls: Pt[][], dx: number, dy: number) => ls.map((l) => 'M' + l.map(([x, y]) => `${f(x + dx)} ${f(y + dy)}`).join('L')).join('');

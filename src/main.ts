@@ -476,7 +476,7 @@ function traceArea() {
 function traceOpts(): TraceOpts {
   const [wm, hm] = traceArea();
   return { colours: S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening,
-    widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded ? 16 : 11, darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined };
+    widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded ? 16 : 11, fair: S.traceSmooth * 2, darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined };
 }
 const traceKeyOf = (o: TraceOpts) => JSON.stringify([o, traceSrc.length, traceSrc.slice(-64), traceCrop]);
 
@@ -710,7 +710,7 @@ function traceControls(): Node[] {
       h('p', { class: 'note' }, 'Shading and texture trace badly. Open Gemini, choose Nano Banana Pro (the image model), attach your picture and paste this prompt. Then upload the result here.'),
       h('textarea', { class: 'ptext', readonly: true, rows: 6 }, REDRAW_PROMPT(S.traceColours))),
     slider('Colours (sheets)', () => S.traceColours, (v) => { S.traceColours = v; traceOrder = null; tracePalette = null; }, 3, 16, 1, '', 'How many flat colours to find; each one is a sheet'),
-    slider('Smoothness', () => S.traceSmooth, (v) => (S.traceSmooth = v), 0, 2, 0.05, 'mm', 'Rounds every edge into flowing curves; higher loses fine detail'),
+    slider('Smoothness', () => S.traceSmooth, (v) => (S.traceSmooth = v), 0, 2, 0.05, 'mm', 'Fairs every edge into smooth curves (corners stay sharp); higher loses fine detail'),
     slider('Smallest loose piece', () => S.traceMinPiece, (v) => (S.traceMinPiece = v), 2, 200, 1, 'mm²', 'Loose pieces smaller than this blend into the colour around them'),
     toggle('Outline follows the picture', () => !!S.traceFollow, (v) => { S.traceFollow = v; }),
     toggle('Darkest colour on top', () => S.traceDarkFirst, (v) => { S.traceDarkFirst = v; traceOrder = null; }),

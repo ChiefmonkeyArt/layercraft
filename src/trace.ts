@@ -18,7 +18,8 @@ export interface TraceOpts {
   palette?: string[];       // reuse these colours instead of finding new ones
   follow?: boolean;         // the outer cut follows the artwork's silhouette (background removed)
   rimMm?: number;           // follow: solid rim around the silhouette, mm
-  merge?: number;           // colours closer than this (ΔE) are one ink; larger for photos of prints
+  merge?: number;
+  fair?: number;            // curve fairing scale, mm: ripples shorter than this are smoothed into curves (0 = off)           // colours closer than this (ΔE) are one ink; larger for photos of prints
 }
 export interface TraceOut {
   palette: string[];        // found colours (#rrggbb), in palette index order
@@ -237,6 +238,69 @@ function smoothRing(p: Pt[], sigma: number): Pt[] {
   return p.map((_, i) => { let x = 0, y = 0; for (let j = -k; j <= k; j++) { const q = p[(i + j + n) % n], ww = wts[j + k]; x += q[0] * ww; y += q[1] * ww; } return [x / s, y / s] as Pt; });
 }
 
+/**
+ * Fair a closed ring into smooth curves: resample evenly, find the real corners, then
+ * smooth each stretch between corners without shrinking it (2·G − G·G). Ripples shorter
+ * than about `scale` disappear; curves keep their size and corners stay sharp.
+ */
+export function fairRing(p: Pt[], scale: number, cornerDeg = 55): Pt[] {
+  if (p.length < 6 || scale < 0.5) return p;
+  // even resampling
+  let len = 0; const seg: number[] = [];
+  for (let i = 0; i < p.length; i++) { const a = p[i], b = p[(i + 1) % p.length]; const d = Math.hypot(b[0] - a[0], b[1] - a[1]); seg.push(d); len += d; }
+  const hS = Math.max(0.35, Math.min(scale / 4, len / 40));
+  const n = Math.max(12, Math.round(len / hS)), step = len / n;
+  const q: Pt[] = []; let si = 0, acc = 0;
+  for (let k = 0; k < n; k++) {
+    const t = k * step;
+    while (si < p.length - 1 && acc + seg[si] < t) { acc += seg[si]; si++; }
+    const a = p[si], b = p[(si + 1) % p.length], u = seg[si] ? (t - acc) / seg[si] : 0;
+    q.push([a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u]);
+  }
+  // corners: a sharp turn over a short window, kept at the local maximum
+  const W = Math.max(2, Math.round(0.5 * scale / step));
+  const turn = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = q[(i - W + n) % n], b = q[i], c = q[(i + W) % n];
+    const a1 = Math.atan2(b[1] - a[1], b[0] - a[0]), a2 = Math.atan2(c[1] - b[1], c[0] - b[0]);
+    let d = Math.abs(a2 - a1); if (d > Math.PI) d = 2 * Math.PI - d; turn[i] = d;
+  }
+  const lim = (cornerDeg * Math.PI) / 180, corners: number[] = [];
+  for (let i = 0; i < n; i++) {
+    if (turn[i] < lim) continue;
+    let peak = true; for (let j = 1; j <= W; j++) if (turn[(i + j) % n] > turn[i] || turn[(i - j + n) % n] >= turn[i]) { peak = false; break; }
+    if (peak) corners.push(i);
+  }
+  const sig = scale / step;
+  const gauss = (src: Pt[], closed: boolean): Pt[] => {
+    const m = src.length, k = Math.min(Math.ceil(sig * 2.5), closed ? Math.floor(m / 2) - 1 : m - 1);
+    if (k < 1) return src;
+    const wts: number[] = []; for (let j = -k; j <= k; j++) wts.push(Math.exp(-(j * j) / (2 * sig * sig)));
+    const at = (i: number): Pt => {
+      if (closed) return src[((i % m) + m) % m];
+      if (i < 0) { const r = src[Math.min(m - 1, -i)]; return [2 * src[0][0] - r[0], 2 * src[0][1] - r[1]]; } // odd reflection keeps the end fixed
+      if (i >= m) { const r = src[Math.max(0, 2 * (m - 1) - i)]; return [2 * src[m - 1][0] - r[0], 2 * src[m - 1][1] - r[1]]; }
+      return src[i];
+    };
+    return src.map((_, i) => { let x = 0, y = 0, s = 0; for (let j = -k; j <= k; j++) { const v = at(i + j), ww = wts[j + k]; x += v[0] * ww; y += v[1] * ww; s += ww; } return [x / s, y / s] as Pt; });
+  };
+  const fair = (src: Pt[], closed: boolean): Pt[] => {
+    const g1 = gauss(src, closed), g2 = gauss(g1, closed);
+    const out = g1.map((v, i) => [2 * v[0] - g2[i][0], 2 * v[1] - g2[i][1]] as Pt);
+    if (!closed) { out[0] = src[0]; out[out.length - 1] = src[src.length - 1]; }
+    return out;
+  };
+  if (!corners.length) return fair(q, true);
+  const out: Pt[] = [];
+  for (let c = 0; c < corners.length; c++) {
+    const a = corners[c], b = corners[(c + 1) % corners.length];
+    const part: Pt[] = [q[a]]; for (let i = (a + 1) % n; ; i = (i + 1) % n) { part.push(q[i]); if (i === b) break; }
+    const f = part.length > 3 ? fair(part, false) : part;
+    out.push(...f.slice(0, -1));
+  }
+  return out;
+}
+
 // ---------- the trace ----------
 export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) => void): TraceOut {
   const t0 = performance.now();
@@ -400,7 +464,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
       const g = blur(fld, pw, ph, Math.max(0.8, 0.8 / px));
       for (let x = 0; x < pw; x++) { g[x] = 1; g[(ph - 1) * pw + x] = 1; }
       for (let y = 0; y < ph; y++) { g[y * pw] = 1; g[y * pw + pw - 1] = 1; }
-      const rings = contours(g, pw, ph).map((r) => rdpClosed(smoothRing(r, 1.2), 0.04 / px)).filter((r) => r.length >= 3);
+      const rings = contours(g, pw, ph).map((r) => rdpClosed(fairRing(smoothRing(r, 1.2), (o.fair ?? 1) * 1.5 / px), 0.03 / px)).filter((r) => r.length >= 3);
       const area = (r: Pt[]) => { let a = 0; for (let i = 0; i < r.length; i++) { const [x1, y1] = r[i], [x2, y2] = r[(i + 1) % r.length]; a += x1 * y2 - x2 * y1; } return Math.abs(a / 2); };
       const best = rings.sort((a, b) => area(b) - area(a))[0];
       if (best) outline = best.map(([x, y]) => [(x - pad + 0.5 - w / 2) * px, (y - pad + 0.5 - h / 2) * px] as Pt);
@@ -540,8 +604,8 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
     for (let x = 0; x < pw; x++) { g[x] = 1; g[(ph - 1) * pw + x] = 1; }
     for (let y = 0; y < ph; y++) { g[y * pw] = 1; g[y * pw + pw - 1] = 1; }
     const rings = contours(g, pw, ph)
-      .map((r) => smoothRing(r, 1.2))
-      .map((r) => rdpClosed(r, 0.04 / px))
+      .map((r) => fairRing(smoothRing(r, 1.2), (o.fair ?? 1) / px))
+      .map((r) => rdpClosed(r, 0.03 / px))
       .filter((r) => r.length >= 3)
       .map((r) => r.map(([x, y]) => [(x - 1 + 0.5 - w / 2) * px, (y - 1 + 0.5 - h / 2) * px] as Pt));
     openings.push(rings);
