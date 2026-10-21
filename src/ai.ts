@@ -8,6 +8,18 @@ export const MODELS: AiModel[] = [
   { id: 'gemini-3-pro-image', label: 'Nano Banana Pro', note: 'best detail' },
   { id: 'gemini-3.1-flash-image', label: 'Nano Banana 2', note: 'cheaper, faster' },
 ];
+/** The model that redraws pictures in flat colours: Nano Banana Pro gave by far the cleanest bands and lettering. */
+export const FLAT_MODEL = 'gemini-3-pro-image';
+
+/** Image models newer than the ones above that a node lists (e.g. a later Gemini pro image); offered to try, never picked silently. */
+const newer = new Map<string, AiModel>();
+const NEWER = /^(?:google\/)?gemini-(\d+(?:\.\d+)?)-pro-image(?:-preview)?$/;
+function noteNewer(id: string) {
+  const m = id.match(NEWER);
+  if (!m || +m[1] <= 3 || MODELS.some((x) => x.id === id)) return;
+  newer.set(id, { id, label: `Gemini ${m[1]} Pro Image`, note: 'newer, untested' });
+}
+export const newerModels = () => [...newer.values()];
 
 const RELAYS = ['wss://relay.routstr.com', 'wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net'];
 // used if the relays can't be reached; each one is still checked live before use
@@ -60,10 +72,11 @@ export function nostrNodes(wait = 4500): Promise<{ url: string; name: string }[]
   });
 }
 
-let offersCache: { model: string; at: number; offers: NodeOffer[] } | null = null;
+const offersCache = new Map<string, { at: number; offers: NodeOffer[] }>();
 /** Live nodes that offer the model, cheapest first. */
 export async function findOffers(model: string): Promise<NodeOffer[]> {
-  if (offersCache && offersCache.model === model && Date.now() - offersCache.at < 10 * 60e3) return offersCache.offers;
+  const hit = offersCache.get(model);
+  if (hit && Date.now() - hit.at < 10 * 60e3) return hit.offers;
   const announced = await nostrNodes();
   const names = new Map(announced.map((n) => [n.url, n.name]));
   const urls = [...new Set([...announced.map((n) => n.url), ...BOOTSTRAP])].slice(0, 30);
@@ -73,13 +86,15 @@ export async function findOffers(model: string): Promise<NodeOffer[]> {
       const r = await timed(`${u}/v1/models`, {}, 7000);
       if (!r.ok) return;
       const j = await r.json();
-      const m = (j.data ?? j).find((x: any) => x?.id === model && x.enabled !== false);
+      const list = (j.data ?? j) as any[];
+      for (const x of list) if (x?.enabled !== false && typeof x?.id === 'string') noteNewer(x.id);
+      const m = list.find((x: any) => x?.id === model && x.enabled !== false);
       const max = Number(m?.sats_pricing?.max_cost);
       if (m && isFinite(max) && max > 0) offers.push({ url: u, name: names.get(u) || new URL(u).hostname, maxSats: Math.ceil(max) });
     } catch { /* node offline or blocked */ }
   }));
   offers.sort((a, b) => a.maxSats - b.maxSats);
-  offersCache = { model, at: Date.now(), offers };
+  offersCache.set(model, { at: Date.now(), offers });
   return offers;
 }
 

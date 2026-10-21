@@ -90,6 +90,25 @@ export function createGuided(api: GuidedApi) {
     void cost().then((m) => { if (m) { const u = fmtUsd(m, api.ai.usd()); price.textContent = `up to ${fmtSats(m)}${u ? ` · ${u}` : ''}`; } });
     return b;
   }
+  /** Redraw the picture in flat, cut-ready colours (Nano Banana Pro unless changed), then use the redraw. */
+  async function flatten() {
+    const p = api.picture();
+    const im = await new Promise<HTMLImageElement>((res) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => res(i); i.src = p.src; });
+    const url = await api.ai.create(api.redrawPrompt(), p.src, nearestAspect(im.naturalWidth || 3, im.naturalHeight || 4), () => busy(`Redrawing in flat colours with ${api.ai.flat.label()}…`), api.ai.flat.model());
+    if (url) { await api.usePicture(url, `${(p.name || 'picture').replace(/\.[a-z]+$/i, '')}-flat.png`, true); api.toast('Flat redraw ready. Compare it with the trace, or press Next.'); }
+    busy('');
+    draw();
+  }
+  const isRedraw = () => /-flat\.png$/i.test(api.picture().name || '');
+  /** Photos and shaded art: the recommended first step is the AI flat redraw. */
+  function flattenFirstCard() {
+    const c = api.pictureCheck();
+    return h('div', { class: 'gok warn gflatfirst' },
+      h('b', {}, 'Recommended first step: flatten it'),
+      h('p', {}, `This looks like a photo or shaded art, which traces with ragged edges. ${api.ai.flat.label()} redraws it as clean flat colours with smooth, even curves, then it traces cleanly.`),
+      aiButton(`Flatten with ${api.ai.flat.label()}`, flatten, api.ai.flat.cost),
+      h('p', { class: 'note' }, c ? `Uses the AI check below: ${c.inks.length} inks${c.text ? ' and the exact lettering' : ''}.` : 'For the most faithful redraw, run Check with AI below first (a few sats); it tells the redraw the exact inks and lettering.'));
+  }
   /** The AI picture check: a vision model reads the shapes and inks, ignoring light and shade. */
   function checkCard() {
     const c = api.pictureCheck();
@@ -189,7 +208,7 @@ export function createGuided(api: GuidedApi) {
         ...(() => {
           const info = api.pictureInfo();
           if (!info) return [];
-          if (info.shaded) return api.pictureCheck() ? [] : [h('div', { class: 'gok warn' }, h('b', {}, 'This picture has shading or lots of colours'), h('p', {}, 'Check it with AI below, or let the Flatten step redraw it in flat colours first.'))];
+          if (info.shaded) return isRedraw() ? [] : [flattenFirstCard()];
           const sw = h('div', { class: 'gswatches', 'aria-label': 'Colours found' });
           for (const f of info.found) sw.append(h('i', { style: `background:${f.hex}`, title: f.hex }));
           return [h('div', { class: 'gfield' }, h('div', { class: 'glab' }, `Found ${info.colours} flat colours`), sw,
@@ -208,20 +227,17 @@ export function createGuided(api: GuidedApi) {
         lead('Laser layers need flat colour areas. Shading, texture and photos trace badly.'),
         h('div', { class: 'gok' }, h('b', {}, 'Already flat colours?'), h('p', {}, 'Like the Daruma demo. Just press Next.')),
         h('div', { class: 'gfield' },
-          aiButton('Flatten with AI', async () => {
-            const p = api.picture();
-            const im = await new Promise<HTMLImageElement>((res) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => res(i); i.src = p.src; });
-            const url = await api.ai.create(api.redrawPrompt(), p.src, nearestAspect(im.naturalWidth || 3, im.naturalHeight || 4), () => busy('Redrawing in flat colours…'));
-            if (url) { await api.usePicture(url, `${(p.name || 'picture').replace(/\.[a-z]+$/i, '')}-flat.png`, true); api.toast('Flat redraw ready. Compare it with the trace, or press Next.'); }
-            busy('');
-          }),
+          aiButton(`Flatten with ${api.ai.flat.label()}`, flatten, api.ai.flat.cost),
           (() => {
             const c = api.pictureCheck();
-            if (!c) return h('p', { class: 'note' }, `Redraws your picture in ${S.traceColours} flat, cut-ready colours with ${api.ai.modelLabel()}. Pay per use with Bitcoin. Tip: run Check with AI on the Picture step first for a much more faithful redraw.`);
+            if (!c) return h('p', { class: 'note' }, `Redraws your picture in ${S.traceColours} flat, cut-ready colours with ${api.ai.flat.label()}. Pay per use with Bitcoin. Tip: run Check with AI on the Picture step first for a much more faithful redraw.`);
             const sw = h('div', { class: 'gswatches gnamed' });
             for (const k of c.inks) sw.append(h('span', { class: 'gink' }, h('i', { style: `background:${k.hex}` }), h('small', {}, k.name || k.hex)));
-            return h('div', {}, h('p', { class: 'note' }, `Uses the AI check: exactly these ${c.inks.length} inks${c.text ? ', the same lettering' : ''}, smooth even curves, no light or shade. With ${api.ai.modelLabel()}, pay per use with Bitcoin.`), sw);
+            return h('div', {}, h('p', { class: 'note' }, `Uses the AI check: exactly these ${c.inks.length} inks${c.text ? ', the same lettering' : ''}, smooth even curves, no light or shade. With ${api.ai.flat.label()}, pay per use with Bitcoin.`), sw);
           })()),
+        h('details', { class: 'gmore' }, h('summary', {}, 'Redraw model'),
+          chips<string>('Model', api.ai.flat.choices().map((m) => [m.id, m.label, m.id === 'gemini-3-pro-image' ? 'recommended' : m.note] as [string, string, string]), () => api.ai.flat.model(), (v) => { api.ai.flat.set(v); draw(); }),
+          h('p', { class: 'note' }, 'Nano Banana Pro gave the cleanest bands and lettering in our tests. Newer models appear here when an AI node offers them.')),
         h('details', { class: 'gmore' }, h('summary', {}, 'Do it yourself now'),
           h('p', { class: 'note' }, 'Open Gemini, choose Nano Banana Pro, attach your picture and paste this prompt. Then choose the result as your picture.'),
           h('button', { class: 'btn small', onclick: copy }, 'Copy redraw prompt'),

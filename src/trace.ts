@@ -715,21 +715,25 @@ function labToRgb([l, a, b]: number[]): [number, number, number] {
 }
 
 /** Prompt for an image AI (Nano Banana Pro / Gemini) to redraw a picture as flat colours first. */
-export interface RedrawHints { inks: { hex: string; name: string; role: string }[]; background: string | null; text: string; font: string; shapes: string }
+export interface RedrawHints { inks: { hex: string; name: string; role: string }[]; background: string | null; text: string; font: string; shapes: string; kind?: string; photo?: boolean; textLines?: string[] }
 /** The prompt for an AI redraw in flat, cut-ready colours; much sharper when the AI picture check has run. */
 export const REDRAW_PROMPT = (n: number, c?: RedrawHints | null) => {
   if (!c) return `Redraw the attached image as a flat colour-separation drawing for multi-layer laser cutting. Straight-on front view, same composition, every shape in the same place - do not redesign. Use exactly ${n} flat colours: no shading, gradients, texture, glow or shadows. Every edge a smooth, flowing, organic curve with crisp edges - no jagged edges, specks or noise. Do not outline colour areas with thin black lines; neighbouring colours touch directly. Plain flat background outside the artwork.`;
   const inks = c.inks.map((k) => `${k.name || 'colour'} ${k.hex}${k.role ? ` (${k.role})` : ''}`).join(', ');
   const hasOutline = c.inks.some((k) => /outline/i.test(k.role));
+  const bands = c.inks.filter((k) => !/text|letter/i.test(k.role));
+  const lines = c.textLines;
+  const said = lines && lines.length > 1 ? `, on ${lines.length} lines: ${lines.map((l) => `"${l}"`).join(' / ')}` : `: "${c.text}"`;
   return [
-    'Redraw the attached image as clean flat vector-style artwork for multi-layer laser cutting. Straight-on front view, same composition and proportions, every shape in exactly the same place - do not redesign or restyle it.',
+    `The attached image is ${c.photo ? 'a photo of a real piece' : 'a picture'}${c.kind ? ` (${c.kind})` : ''}. Redraw it as clean flat vector-style artwork for multi-layer laser cutting. Straight-on front view, same composition, outline shape and proportions, every shape in exactly the same place - do not redesign or restyle it.`,
     c.shapes ? `The artwork is: ${c.shapes}` : '',
     `Use exactly these ${c.inks.length} flat colours and no others: ${inks}.`,
+    bands.length >= 3 && /band|offset|concentric|layer|ring/i.test(c.shapes) ? `From the outside in, the bands are: ${bands.map((k) => k.name || k.hex).join(', ')}.` : '',
     'Remove everything that comes from the camera or the material: lighting, shading, shadows between layers, reflections, texture, grain and blur.',
     'Every edge must be a crisp, perfectly smooth curve. Rounded shapes stay perfectly rounded; bands that run alongside each other keep an even width all the way round, like clean offset paths. No jagged edges, wobbles, specks or noise.',
-    c.text ? `Keep the lettering exactly as written: "${c.text}"${c.font ? `, in a clean ${c.font} style` : ''}, same size, weight and position, with crisp letter shapes and clear gaps between letters.` : '',
+    c.text ? `Keep the lettering exactly as written${said}${c.font ? `, in a clean ${c.font} style` : ''}, same size, weight and position, with crisp letter shapes, exact spelling and clear gaps between letters.` : '',
     hasOutline ? 'Keep the outline as one even, smooth band.' : 'Do not add thin black outlines; neighbouring colours touch directly.',
-    `Plain flat ${c.background ? c.background : 'white'} background outside the artwork.`,
+    `Plain flat ${c.background ? c.background : 'white'} background outside the artwork. No extra elements, no drop shadow, no 3D effect.`,
   ].filter(Boolean).join(' ');
 };
 

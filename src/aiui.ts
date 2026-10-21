@@ -1,7 +1,7 @@
 // The AI credit sheet: pay with Lightning (QR) or Cashu, see what's left, top up, end and refund.
 import QRCode from 'qrcode';
 import {
-  MODELS, NodeOffer, Session, balance, btcUsd, createInvoice, findOffers, fmtSats, fmtUsd, generateImage, getSession,
+  FLAT_MODEL, MODELS, newerModels, NodeOffer, Session, balance, btcUsd, createInvoice, findOffers, fmtSats, fmtUsd, generateImage, getSession,
   invoiceStatus, parseSessionCode, redeemCashu, refund, sessionCode, setSession, shrinkForUpload, topupCashu,
   checkPicture, visionOffer, type PictureCheck,
 } from './ai';
@@ -19,6 +19,8 @@ export function createAiUi(h: H, toast: (m: string) => void) {
   let offers: NodeOffer[] = [];
   let offer: NodeOffer | null = null;
   let model = MODELS.some((m) => m.id === store.get('lc.ai.model')) ? store.get('lc.ai.model')! : MODELS[0].id;
+  // the flat redraw has its own model, Nano Banana Pro unless changed on the Flatten step
+  let flatModel = store.get('lc.ai.flatModel') || FLAT_MODEL;
   let amount = AMOUNTS[0];
   let poll = 0;
   let afterPay: (() => void) | null = null;
@@ -226,14 +228,23 @@ export function createAiUi(h: H, toast: (m: string) => void) {
     if (getSession()) viewSession(); else void viewBuy();
   }
 
-  /** Make one picture; asks for credit first if there is none. */
-  async function create(prompt: string, ref: string | undefined, aspect: string, onStart: () => void): Promise<string | null> {
+  /** Make one picture; asks for credit first if there is none. `use` overrides the model (the flat redraw). */
+  async function create(prompt: string, ref: string | undefined, aspect: string, onStart: () => void, use?: string): Promise<string | null> {
     const s = getSession();
     if (!s) { open(() => toast('Credit added. Press the button again to create.')); return null; }
+    let m = use ?? model;
+    // the credit lives on one node: if it doesn't offer this model, fall back to one it does
+    if (use) {
+      const has = async (id: string) => { try { return (await findOffers(id)).some((o) => o.url === s.node); } catch { return true; } };
+      if (!(await has(m))) {
+        const alt = MODELS.find((x) => x.id !== m && x.id !== use) ?? MODELS.find((x) => x.id !== m);
+        if (alt && (await has(alt.id))) { toast(`${s.name} doesn't offer ${labelOf(m)} right now, so ${alt.label} is used.`); m = alt.id; }
+      }
+    }
     onStart();
     try {
       const refUrl = ref ? await shrinkForUpload(ref) : undefined;
-      const url = await generateImage(s, model, prompt, refUrl, aspect);
+      const url = await generateImage(s, m, prompt, refUrl, aspect);
       void refreshCredit();
       return url;
     } catch (e: any) {
@@ -271,11 +282,19 @@ export function createAiUi(h: H, toast: (m: string) => void) {
     }
   }
 
-  const modelLabel = () => MODELS.find((m) => m.id === model)?.label ?? model;
+  const labelOf = (id: string) => [...MODELS, ...newerModels()].find((m) => m.id === id)?.label ?? id;
+  const modelLabel = () => labelOf(model);
   const maxCost = async () => { if (!offers.length) { try { await loadOffers(); } catch { /* offline */ } } const s = getSession(); return (offers.find((o) => o.url === s?.node) ?? offer)?.maxSats ?? null; };
+  /** Most a flat redraw can cost: on the credit's node, else the cheapest node. */
+  const flatCost = async () => { try { const o = await findOffers(flatModel); const s = getSession(); return (o.find((x) => x.url === s?.node) ?? o[0])?.maxSats ?? null; } catch { return null; } };
+  const flat = {
+    model: () => flatModel, label: () => labelOf(flatModel), cost: flatCost,
+    choices: () => [...MODELS, ...newerModels()],
+    set: (id: string) => { flatModel = id; store.set('lc.ai.flatModel', id === FLAT_MODEL ? '' : id); },
+  };
 
   if (getSession()) void refreshCredit(); else drawBadge();
   void btcUsd().then((v) => { usd = v; });
-  return { badge, open, create, check, visionCost, refreshCredit, credit: () => credit, usd: () => usd, hasSession: () => !!getSession(), onChange: (f: () => void) => listeners.add(f), modelLabel, maxCost };
+  return { badge, open, create, check, visionCost, refreshCredit, credit: () => credit, usd: () => usd, hasSession: () => !!getSession(), onChange: (f: () => void) => listeners.add(f), modelLabel, maxCost, flat };
 }
 export type AiUi = ReturnType<typeof createAiUi>;
