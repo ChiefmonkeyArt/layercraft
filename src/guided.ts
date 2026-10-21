@@ -4,6 +4,7 @@ import type { Settings } from './engine';
 import type { AiUi } from './aiui';
 import { IDEA_PROMPT, fmtSats, fmtUsd, type PictureCheck } from './ai';
 import { nearestAspect } from './aiui';
+import { FONTS } from './lettering';
 
 /** localStorage that never throws (sandboxed frames and private modes can block it). */
 export const store = {
@@ -108,7 +109,7 @@ export function createGuided(api: GuidedApi) {
       sw,
       c.shapes ? h('p', {}, c.shapes) : null,
       c.text ? h('p', {}, `Lettering: “${c.text}”${c.font ? ` in a ${c.font} style` : ''}.`) : null,
-      h('p', {}, 'Applied: colour count, background and layer order (top to back). Change any of them on the Trace and Layers steps.'),
+      h('p', {}, `Applied: colour count, background and layer order (top to back)${c.text ? ', and the lettering redrawn in a real font' : ''}. Change any of them on the Trace and Layers steps.`),
       h('div', { class: 'gbtns' }, h('button', { class: 'btn small', onclick: () => { api.applyCheck(c); api.toast('AI settings applied again'); } }, 'Apply again'),
         aiButton('Check again', run, api.ai.visionCost, 'small ghost')));
   }
@@ -238,6 +239,7 @@ export function createGuided(api: GuidedApi) {
         opts.sort((a, b) => a[0] - b[0]);
         return chips('Colours', opts, () => S.traceColours, (v) => { S.traceColours = v; api.changed(true); });
       })(),
+      ...(api.pictureCheck()?.text ? [chips<string>('Lettering', [['', 'As traced'], ...FONTS.map((f) => [f.id, f.label] as [string, string])], () => S.traceFont ?? '', (v) => { S.traceFont = v; api.changed(); })] : []),
       chips('Edges', [[0.9, 'Soft', 'flowing curves'], [0.45, 'Crisp', 'more detail']], () => (S.traceSmooth >= 0.55 ? 0.9 : 0.45), (v) => { S.traceSmooth = v; api.changed(); }),
       chips('Outline', [['follow', 'Follow the picture', 'background removed'], ['rect', 'Rectangle'], ['circle', 'Circle']],
         () => (S.traceFollow ? 'follow' : S.shape === 'circle' ? 'circle' : 'rect'),

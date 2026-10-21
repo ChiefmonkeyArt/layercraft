@@ -19,7 +19,8 @@ export interface TraceOpts {
   follow?: boolean;         // the outer cut follows the artwork's silhouette (background removed)
   rimMm?: number;           // follow: solid rim around the silhouette, mm
   merge?: number;
-  fair?: number;            // curve fairing scale, mm: ripples shorter than this are smoothed into curves (0 = off)           // colours closer than this (ΔE) are one ink; larger for photos of prints
+  fair?: number;
+  lettering?: { hex: string; font: string; lines: string[]; shapes?: Pt[][][] }; // replace traced letters with font outlines            // curve fairing scale, mm: ripples shorter than this are smoothed into curves (0 = off)           // colours closer than this (ΔE) are one ink; larger for photos of prints
 }
 export interface TraceOut {
   palette: string[];        // found colours (#rrggbb), in palette index order
@@ -28,6 +29,9 @@ export interface TraceOut {
   openings: Pt[][][];       // per cut sheet (all but the back): rings of the openings, mm, centred
   pieces: number[];         // loose glue-in pieces per sheet
   outline?: Pt[];           // follow: the outer cut, mm, centred on the image area
+  letterLines?: number;     // lines of lettering found in the picture
+  letterWidths?: number[];  // how wide each of those lines is (relative)
+  lettered?: boolean;       // the font lettering was placed
   ms: number;
 }
 
@@ -303,6 +307,87 @@ export function fairRing(p: Pt[], scale: number, cornerDeg = 55): Pt[] {
   return out;
 }
 
+/** Fill closed rings (pixel coords) with the nonzero rule; returns a mask. */
+function fillRings(rings: Pt[][], w: number, h: number): Mask {
+  const m = new Uint8Array(w * h);
+  let y0 = h, y1 = 0;
+  for (const r of rings) for (const [, y] of r) { y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  for (let y = Math.max(0, Math.floor(y0)); y <= Math.min(h - 1, Math.ceil(y1)); y++) {
+    const yc = y + 0.5, xs: [number, number][] = [];
+    for (const r of rings) for (let i = 0; i < r.length; i++) {
+      const a = r[i], b = r[(i + 1) % r.length];
+      if ((a[1] <= yc) === (b[1] <= yc)) continue;
+      xs.push([a[0] + ((yc - a[1]) / (b[1] - a[1])) * (b[0] - a[0]), b[1] > a[1] ? 1 : -1]);
+    }
+    xs.sort((p, q) => p[0] - q[0]);
+    let wnd = 0;
+    for (let i = 0; i < xs.length - 1; i++) {
+      wnd += xs[i][1];
+      if (!wnd) continue;
+      for (let x = Math.max(0, Math.ceil(xs[i][0] - 0.5)); x <= Math.min(w - 1, Math.floor(xs[i + 1][0] - 0.5)); x++) m[y * w + x] = 1;
+    }
+  }
+  return m;
+}
+
+/**
+ * Swap the traced lettering for font outlines: find the letters (the text colour, away from the
+ * picture's edge), group them into lines, fit each line of font outlines to its line's box, and
+ * give the old letter pixels to the colour around them.
+ */
+function placeLettering(lbl: Int32Array, inside: Mask, w: number, h: number, P: number[][], L: NonNullable<TraceOpts['lettering']>): { lines: number; widths?: number[]; placed: boolean } {
+  const want = lab(...hexRgb(L.hex));
+  let tc = 0, bd = Infinity;
+  P.forEach((c, i) => { const d = (c[0] - want[0]) ** 2 + (c[1] - want[1]) ** 2 + (c[2] - want[2]) ** 2; if (d < bd) { bd = d; tc = i; } });
+  const N = w * h, m = new Uint8Array(N);
+  for (let i = 0; i < N; i++) m[i] = inside[i] && lbl[i] === tc ? 1 : 0;
+  const cc = components(m, w, h);
+  // letters: pieces of the text colour that do not touch the edge and are not huge or specks
+  const bx = Array.from({ length: cc.n + 1 }, () => [w, h, -1, -1, 0]);
+  for (let i = 0; i < N; i++) { const l = cc.lab[i]; if (!l) continue; const x = i % w, y = (i / w) | 0, b = bx[l]; b[0] = Math.min(b[0], x); b[1] = Math.min(b[1], y); b[2] = Math.max(b[2], x); b[3] = Math.max(b[3], y); }
+  const edge = new Uint8Array(cc.n + 1);
+  for (let l = 1; l <= cc.n; l++) { const b = bx[l]; if (b[0] <= 1 || b[1] <= 1 || b[2] >= w - 2 || b[3] >= h - 2) edge[l] = 1; }
+  const letters: number[] = [];
+  for (let l = 1; l <= cc.n; l++) if (!edge[l] && cc.size[l] > N * 0.00005 && cc.size[l] < N * 0.08) letters.push(l);
+  if (!letters.length) return { lines: 0, placed: false };
+  // lines: letters whose heights overlap enough
+  letters.sort((a, b) => (bx[a][1] + bx[a][3]) - (bx[b][1] + bx[b][3]));
+  const groups: { ids: number[]; y0: number; y1: number }[] = [];
+  for (const l of letters) {
+    const [, y0, , y1] = bx[l], hgt = y1 - y0 + 1;
+    const g = groups.find((g) => Math.min(g.y1, y1) - Math.max(g.y0, y0) > 0.45 * Math.min(hgt, g.y1 - g.y0 + 1));
+    if (g) { g.ids.push(l); g.y0 = Math.min(g.y0, y0); g.y1 = Math.max(g.y1, y1); } else groups.push({ ids: [l], y0, y1 });
+  }
+  // a line holds most of the lettering's area; drop stray bits that formed their own "line"
+  const area = (g: { ids: number[] }) => g.ids.reduce((a, l) => a + cc.size[l], 0);
+  const big = Math.max(...groups.map(area));
+  const lines = groups.filter((g) => area(g) > big * 0.12).sort((a, b) => a.y0 - b.y0);
+  const widths = lines.map((g) => { let a = w, b = 0; for (const l of g.ids) { a = Math.min(a, bx[l][0]); b = Math.max(b, bx[l][2] + 1); } return (b - a) / w; });
+  if (!L.shapes || L.shapes.length !== lines.length) return { lines: lines.length, widths, placed: false };
+  // clear the old letters, letting the colour around them flow in
+  const known = new Uint8Array(N).fill(1);
+  for (const g of lines) for (const l of g.ids) { const b = bx[l]; for (let y = b[1]; y <= b[3]; y++) for (let x = b[0]; x <= b[2]; x++) if (cc.lab[y * w + x] === l) known[y * w + x] = 0; }
+  fillUnknown(lbl, known, w, h);
+  // fit each line of font outlines to its box
+  lines.forEach((g, k) => {
+    let x0 = w, x1 = 0; for (const l of g.ids) { x0 = Math.min(x0, bx[l][0]); x1 = Math.max(x1, bx[l][2] + 1); }
+    const y0 = g.y0, y1 = g.y1 + 1;
+    const rings = L.shapes![k]; if (!rings.length) return;
+    let gx0 = Infinity, gy0 = Infinity, gx1 = -Infinity, gy1 = -Infinity;
+    for (const r of rings) for (const [x, y] of r) { gx0 = Math.min(gx0, x); gx1 = Math.max(gx1, x); gy0 = Math.min(gy0, y); gy1 = Math.max(gy1, y); }
+    const sx = (x1 - x0) / Math.max(1e-6, gx1 - gx0), sy = (y1 - y0) / Math.max(1e-6, gy1 - gy0);
+    let mk = fillRings(rings.map((r) => r.map(([x, y]) => [x0 + (x - gx0) * sx, y0 + (y - gy0) * sy] as Pt)), w, h);
+    // match the weight of the original lettering: grow (or thin) until the ink area is the same
+    const oldA = g.ids.reduce((a, l) => a + cc.size[l], 0);
+    let newA = 0, per = 0;
+    for (let i = 0; i < N; i++) if (mk[i]) { newA++; const x = i % w; if (x === 0 || !mk[i - 1] || x === w - 1 || !mk[i + 1] || i < w || !mk[i - w] || i >= N - w || !mk[i + w]) per++; }
+    const dlt = Math.max(-0.02, Math.min(0.02, 0.7 * (oldA - newA) / Math.max(1, per) / (y1 - y0))) * (y1 - y0);
+    if (dlt > 0.4) mk = dilate(mk, w, h, dlt); else if (dlt < -0.4) mk = erode(mk, w, h, -dlt);
+    for (let i = 0; i < N; i++) if (mk[i] && inside[i]) lbl[i] = tc;
+  });
+  return { lines: lines.length, widths, placed: true };
+}
+
 // ---------- the trace ----------
 export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) => void): TraceOut {
   const t0 = performance.now();
@@ -429,6 +514,11 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
       for (let i = 0; i < N; i++) if (g[i] > bestV[i]) { bestV[i] = g[i]; bestL[i] = c; }
     }
     lbl = bestL;
+  }
+  let letterLines: number | undefined, letterWidths: number[] | undefined, lettered = false;
+  if (o.lettering) {
+    const r = placeLettering(lbl, inside, w, h, P, o.lettering);
+    letterLines = r.lines; letterWidths = r.widths; lettered = r.placed;
   }
   // follow the picture: the background is the colour that fills the picture's edge,
   // flood-filled inwards; everything else is the artwork's silhouette
@@ -612,7 +702,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
       .map((r) => r.map(([x, y]) => [(x - 1 + 0.5 - w / 2) * px, (y - 1 + 0.5 - h / 2) * px] as Pt));
     openings.push(rings);
   }
-  return { palette: P.map((c) => { const [r, g, b] = labToRgb(c); return hex(r, g, b); }), share, order, openings, pieces, outline, ms: performance.now() - t0 };
+  return { palette: P.map((c) => { const [r, g, b] = labToRgb(c); return hex(r, g, b); }), share, order, openings, pieces, outline, letterLines, letterWidths, lettered, ms: performance.now() - t0 };
 }
 
 function labToRgb([l, a, b]: number[]): [number, number, number] {

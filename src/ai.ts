@@ -198,6 +198,7 @@ export interface PictureCheck {
   inks: { hex: string; name: string; role: string }[]; // the artwork's flat colours, outermost first
   stack: string[];              // the same inks from the top (nearest the viewer) to the back
   text: string;                 // any lettering, exactly as written
+  textLines?: string[];         // the lettering line by line, top to bottom
   font: string;                 // closest well-known typeface for the lettering
   shapes: string;               // one sentence on the overall shapes
 }
@@ -209,7 +210,8 @@ export const CHECK_PROMPT = `You are preparing a picture for multi-layer laser c
  "inks": [{"hex": "#rrggbb", "name": "plain colour name", "role": "outline | band | shape | text | detail"}],
  "stack": ["#rrggbb", ...],
  "text": "any lettering exactly as written, or empty",
- "font": "closest well-known typeface for the lettering, e.g. Cooper Black, or empty",
+ "textLines": ["each line of the lettering, top to bottom, exactly as written"],
+ "font": "closest well-known typeface for the lettering, e.g. Cooper Black; add the word italic if the letters slant; or empty",
  "shapes": "one sentence on the overall shapes, e.g. concentric rounded bands around three lines of bold text"}
 Rules: inks are the distinct flat paint or material colours of the artwork only (not the background, not shadows), listed from the outermost to the innermost; if the background colour is reused inside the artwork (for example white letters on a white background) include it as an ink too. Give each ink its true clean colour as printed, not the shaded colour in the photo. stack lists the same hex values from the layer nearest the viewer (raised highest) to the back layer, as the piece would be built from stacked sheets. Never more than 12 inks.`;
 
@@ -248,6 +250,6 @@ export async function checkPicture(s: Session, model: string, img: string): Prom
     kind: String(r.kind ?? '').slice(0, 80), photo: !!r.photo,
     background: HEX.test(r.background) ? String(r.background).toLowerCase() : null, plainBackground: !!r.plainBackground,
     inks, stack: stack.length ? stack : inks.map((k: any) => k.hex),
-    text: String(r.text ?? '').slice(0, 200), font: String(r.font ?? '').slice(0, 60), shapes: String(r.shapes ?? '').slice(0, 200),
+    text: String(r.text ?? '').slice(0, 200), textLines: Array.isArray(r.textLines) ? r.textLines.map((x: any) => String(x).slice(0, 80)).filter(Boolean).slice(0, 8) : undefined, font: String(r.font ?? '').slice(0, 60), shapes: String(r.shapes ?? '').slice(0, 200),
   };
 }

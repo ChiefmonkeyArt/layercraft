@@ -14,6 +14,7 @@ import { MOTIFS } from './motifs';
 import type { TraceOpts, TraceOut } from './trace';
 import { REDRAW_PROMPT, analysePicture, hexDist, trace as traceNow } from './trace';
 import type { PictureCheck } from './ai';
+import { lineShapes, pickFont, splitLines } from './lettering';
 import { allLayersSVG, download, exportZip, layerSVG, parseSVG, planSheets, simplify } from './svgio';
 import { createGuided, store } from './guided';
 import { createAiUi } from './aiui';
@@ -39,7 +40,7 @@ const S: Settings = {
   detailMode: 'symmetric', detailStart: 2, detailEvery: 2, detailSpacing: 5, detailVariety: 0.75,
   motifs: MOTIFS.map((m) => m.id),
   repeat: 'centre', freeMirror: 'lr', flowEchoes: 4, flowSpacing: 4, scrollSize: 14, scrollGap: 22,
-  traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false,
+  traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false, traceFont: '',
   corners: false, cornerSize: 0.9, cornerRings: 3, cornerGap: 4.5, cornerCurl: 30, cornerBars: true,
 };
 // Free mode drawing: raw strokes per tool (mirroring is applied when the design is built)
@@ -479,9 +480,19 @@ function traceArea() {
 function traceOpts(): TraceOpts {
   const [wm, hm] = traceArea();
   return { colours: S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening,
-    widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded || pictureCheck?.photo ? 16 : 11, fair: S.traceSmooth * 2, darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined };
+    widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded || pictureCheck?.photo ? 16 : 11, fair: S.traceSmooth * 2, darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined, lettering: letteringOpts() };
 }
-const traceKeyOf = (o: TraceOpts) => JSON.stringify([o, traceSrc.length, traceSrc.slice(-64), traceCrop]);
+/** Font lettering: the AI check found text and a font is chosen. */
+let letterLineCount = 0; // lines of lettering the last trace found
+let letterWidths: number[] | undefined;
+function letteringOpts(): TraceOpts['lettering'] {
+  const c = pictureCheck;
+  if (!S.traceFont || !c?.text) return undefined;
+  const ink = c.inks.find((k) => /text|letter/i.test(k.role)) ?? c.inks[c.inks.length - 1];
+  const n = letterLineCount || c.textLines?.length || 1;
+  return { hex: ink.hex, font: S.traceFont, lines: splitLines(c.text, c.textLines, n, letterWidths) };
+}
+const traceKeyOf = (o: TraceOpts) => JSON.stringify([o, traceSrc.length, traceSrc.slice(-64), traceCrop], (k, v) => (k === 'shapes' ? undefined : v));
 
 function loadImg(src: string): Promise<HTMLImageElement> {
   return new Promise((res, rej) => { const im = new Image(); im.crossOrigin = 'anonymous'; im.onload = () => res(im); im.onerror = () => rej(new Error('Could not read that image')); im.src = src; });
@@ -528,7 +539,7 @@ async function onTraceFile(f: File, demo = false, keepCheck: PictureCheck | null
     // a new picture after the demo is a new project, not an edit of the Daruma
     const wasDemo = !demo && traceName === 'trippy-daruma.webp';
     if (wasDemo) startNew();
-    traceSrc = src; traceName = f.name; traceImgEl = im; pictureCheck = null; checkOrderPending = false;
+    traceSrc = src; traceName = f.name; traceImgEl = im; pictureCheck = null; checkOrderPending = false; letterLineCount = 0; letterWidths = undefined; S.traceFont = '';
     const carried = keepCheck ? { ...keepCheck, photo: false, kind: 'flat AI redraw' } : null;
     traceCrop = autoCrop(im);
     if (wasDemo || projectName === 'Untitled stack') {
@@ -577,6 +588,7 @@ function applyCheck(c: PictureCheck) {
   pictureCheck = c;
   const bgReused = !!c.background && c.inks.some((k) => hexDist(k.hex, c.background!) < 12);
   S.traceColours = Math.max(2, Math.min(12, c.inks.length + (c.background && !bgReused ? 1 : 0)));
+  S.traceFont = c.text ? pickFont(c.font) : ''; letterLineCount = 0; letterWidths = undefined;
   if (c.plainBackground) { S.traceFollow = true; if (S.border > 6) S.border = 4; fitToArtwork(); }
   traceOrder = null; tracePalette = null; checkOrderPending = true;
   syncAll(); schedule(0); autosave();
@@ -647,6 +659,8 @@ async function runTrace() {
   setTraceMsg('Tracing…');
   $('#busy').classList.add('on');
   let img: { w: number; h: number; data: Uint8ClampedArray };
+  if (o.lettering) { try { o.lettering.shapes = await lineShapes(o.lettering.font, o.lettering.lines); } catch { o.lettering = undefined; } }
+  if (job !== traceJob) return;
   try { img = await traceImage(o); } catch (e: any) { traceBusy = false; setTraceMsg('This browser would not let the app read the picture. Try another image file.'); return; }
   const t0 = performance.now();
   const done = (out: TraceOut) => {
@@ -655,6 +669,8 @@ async function runTrace() {
     traceRes = out;
     tracePalette = out.palette;
     traceKey = traceKeyOf(traceOpts());
+    // the picture has a different number of lettering lines than guessed: split again and re-trace
+    if (out.letterLines && o.lettering && !out.lettered && out.letterLines !== letterLineCount) { letterLineCount = out.letterLines; letterWidths = out.letterWidths; }
     if (checkOrderPending && pictureCheck) {
       checkOrderPending = false;
       // a followed outline shows the top sheet as the rim, so the outermost ink stays on top as the frame
@@ -1172,7 +1188,7 @@ function showView(v: typeof view) {
 document.querySelectorAll<HTMLButtonElement>('.tabs [data-v]').forEach((b) => b.addEventListener('click', () => showView(b.dataset.v as any)));
 
 function applyProject(d: any) {
-    Object.assign(S, { detailMode: 'off', repeat: 'centre', corners: false, traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false }, d.settings); // older projects had no detail layers or Free mode
+    Object.assign(S, { detailMode: 'off', repeat: 'centre', corners: false, traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false, traceFont: '' }, d.settings); // older projects had no detail layers or Free mode
     free = d.free ?? emptyFree(); freeUndo.length = 0;
     colourway = d.colourway ?? 'natural';
     if (d.colours) { CUSTOM.top = d.colours.top ?? CUSTOM.top; CUSTOM.bottom = d.colours.bottom ?? CUSTOM.bottom; CUSTOM.sheet = { ...(d.colours.sheet ?? d.colours.detail ?? {}) }; }
