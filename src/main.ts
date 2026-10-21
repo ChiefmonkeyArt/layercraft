@@ -581,13 +581,22 @@ async function traceImage(o: TraceOpts) {
   // a plate is covered edge to edge; a followed outline fits the whole artwork, with a little background round it
   const sc = o.follow ? Math.min(w / cw, hh / ch) * 0.97 : Math.max(w / cw, hh / ch);
   const dw = cw * sc, dh = ch * sc;
-  if (o.follow) {
+  {
     // the background colour: the median round the picture's edge (one corner pixel can be a stray)
     const t = document.createElement('canvas'); t.width = t.height = 64;
     const tx = t.getContext('2d')!; tx.drawImage(im, cx, cy, cw, ch, 0, 0, 64, 64);
     const td = tx.getImageData(0, 0, 64, 64).data, ch3: number[][] = [[], [], []];
-    for (let i = 0; i < 64; i++) for (const q of [i, 63 * 64 + i, i * 64, i * 64 + 63]) for (let k = 0; k < 3; k++) ch3[k].push(td[q * 4 + k]);
-    const [r, g, b] = ch3.map((v) => v.sort((p, q) => p - q)[v.length >> 1]);
+    let clear = 0;
+    for (let i = 0; i < 64; i++) for (const q of [i, 63 * 64 + i, i * 64, i * 64 + 63]) { if (td[q * 4 + 3] < 128) { clear++; continue; } for (let k = 0; k < 3; k++) ch3[k].push(td[q * 4 + k]); }
+    let [r, g, b] = ch3.map((v) => v.sort((p, q) => p - q)[v.length >> 1] ?? 255);
+    if (clear > 128) {
+      // a cut-out on a transparent background: fill with white or black, whichever the artwork's edge is not
+      let sum = 0, n = 0;
+      for (let y = 0; y < 64; y++) for (const dir of [1, -1]) {
+        for (let x = dir > 0 ? 0 : 63; x >= 0 && x < 64; x += dir) { const q = (y * 64 + x) * 4; if (td[q + 3] >= 128) { sum += td[q] + td[q + 1] + td[q + 2]; n++; break; } }
+      }
+      const v = n && sum / n / 3 > 128 ? 0 : 255; r = g = b = v;
+    }
     x.fillStyle = `rgb(${r},${g},${b})`; x.fillRect(0, 0, w, hh);
   }
   x.imageSmoothingQuality = 'high';
