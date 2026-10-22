@@ -117,14 +117,15 @@ export function fitView(canvas: HTMLCanvasElement, s: Settings, pad = 28): View 
   return { scale, ox: w / 2 + VIEW.px * dpr, oy: h / 2 + VIEW.py * dpr };
 }
 
-export interface StackCache { key: EngineResult | null; paths: Path2D[]; thin: Path2D | null }
-export const stackCache: StackCache = { key: null, paths: [], thin: null };
+export interface StackCache { key: EngineResult | null; paths: Path2D[]; thin: Path2D | null; paint: { hex: string; path: Path2D }[][] }
+export const stackCache: StackCache = { key: null, paths: [], thin: null, paint: [] };
 
 function ensureCache(r: EngineResult) {
   if (stackCache.key === r) return;
   stackCache.key = r;
   stackCache.paths = r.layers.map((l) => groupsToPath2D(l.groups));
   stackCache.thin = r.thin.length ? pathsToPath2D(r.thin) : null;
+  stackCache.paint = r.layers.map((l) => (l.paint ?? []).map((p) => ({ hex: p.hex, path: pathsToPath2D(p.paths) })));
 }
 
 export function drawStack(cv: HTMLCanvasElement, r: EngineResult, s: Settings, pal: string, opts: { light: number; showThin: boolean; isPaper: boolean; flat?: boolean }) {
@@ -150,6 +151,8 @@ export function drawStack(cv: HTMLCanvasElement, r: EngineResult, s: Settings, p
     ctx.fillStyle = P.colour(i, n, s.material);
     ctx.fill(path, 'evenodd');
     ctx.shadowColor = 'transparent';
+    // the other colours on this sheet's face
+    for (const p of stackCache.paint[i] ?? []) { ctx.fillStyle = p.hex; ctx.fill(p.path, 'evenodd'); }
     if (!opts.isPaper && pal === 'natural') {
       ctx.clip(path, 'evenodd');
       ctx.globalAlpha = 0.35;

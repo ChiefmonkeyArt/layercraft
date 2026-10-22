@@ -288,7 +288,10 @@ export function createGuided(api: GuidedApi) {
     } },
     { id: 'trace', label: 'Trace', view: 'stack', needsPicture: true, body: () => [
       h('h2', {}, 'Trace and outline'),
-      lead('Pick how many colours to find. Each colour becomes one sheet.'),
+      lead('Layers come from how the shapes sit on each other, not just their colours. One sheet can carry several colours.'),
+      chips<string>('Layers from', [['shapes', 'How pieces sit', 'shape on shape'], ['colour', 'Colours', 'one sheet each']], () => (S.traceDepthBy === 'colour' ? 'colour' : 'shapes'),
+        (v) => { S.traceDepthBy = v as Settings['traceDepthBy']; api.changed(true); }),
+      ...(S.traceDepthBy !== 'colour' ? [chips<string>('Highest', [['centre', 'Middle', 'a mound'], ['edge', 'Outside', 'a tunnel']], () => S.traceRaise ?? 'centre', (v) => { S.traceRaise = v as Settings['traceRaise']; api.changed(); })] : []),
       (() => {
         const info = api.pictureInfo();
         const opts: [number, string, string?][] = [];
@@ -308,7 +311,7 @@ export function createGuided(api: GuidedApi) {
       api.drawTraceList();
       return [
         h('h2', {}, 'Layers'),
-        lead('The top sheet is first. Move a colour up or down to change its depth. Drag the 3D view to look around.'),
+        lead(S.traceDepthBy === 'colour' ? 'The top sheet is first. Move a colour up or down to change its depth. Drag the 3D view to look around.' : 'The top sheet is first, with the colours on each. Drag the 3D view to look around.'),
         chips('Material', [['birch', 'Birch ply', '3 mm'], ['paper', 'Card', '0.4 mm']], () => (S.material === 'paper' ? 'paper' : 'birch'), (v) => { api.setMaterial(v); api.changed(); }),
         (() => {
           const colours = () => api.traced()?.colours ?? S.traceColours;
@@ -319,7 +322,7 @@ export function createGuided(api: GuidedApi) {
           return h('div', {}, f, extra);
         })(),
         h('div', { class: 'gfield' }, h('div', { class: 'glab' }, 'Order, top to bottom'), api.traceList,
-          h('button', { class: 'btn small ghost', onclick: () => api.autoOrder() }, 'Auto order (fewest loose pieces)')),
+          S.traceDepthBy === 'colour' ? h('button', { class: 'btn small ghost', onclick: () => api.autoOrder() }, 'Auto order (fewest loose pieces)') : null),
       ];
     } },
     { id: 'details', label: 'Details', view: 'layers', needsPicture: true, body: () => [

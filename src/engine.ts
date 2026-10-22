@@ -38,14 +38,16 @@ export interface Settings {
   traceLayers?: number;   // sheets wanted, back included; 0 or unset = one per colour
   traceDepth?: 'extend' | 'repeat';
   traceStepMm?: number;   // how far each extended copy steps in, mm
-  traceColourMode?: 'picture' | 'gradient'; // sheet colours from the picture, or one gradient over every sheet
+  traceColourMode?: 'picture' | 'gradient';
+  traceDepthBy?: 'shapes' | 'colour' | 'map'; // where the sheets come from: the picture's structure, its colours, or an AI layer map
+  traceRaise?: 'centre' | 'edge'; // sheet colours from the picture, or one gradient over every sheet
   corners: boolean; cornerSize: number; cornerRings: number; cornerGap: number; cornerCurl: number; cornerBars: boolean;
 }
 
-export interface TraceInput { sig: string; openings: Pt[][][]; outline?: Pt[] }
+export interface TraceInput { sig: string; openings: Pt[][][]; outline?: Pt[]; paint?: { hex: string; rings: Pt[][] }[][] }
 export interface EngineInput { s: Settings; sketch: Pt[][]; imported: Pt[][]; free?: FreeArt; trace?: TraceInput | null }
 
-export interface LayerOut { material: Paths; groups: G.Group[]; islands: number; cutLength: number; isBack: boolean; src?: number; copy?: number } // src: the traced colour sheet it comes from; copy: 0 = the sheet itself, 1+ = extra sheets made from it
+export interface LayerOut { material: Paths; groups: G.Group[]; islands: number; cutLength: number; isBack: boolean; src?: number; copy?: number; paint?: { hex: string; paths: Paths }[] } // src: the traced colour sheet it comes from; copy: 0 = the sheet itself, 1+ = extra sheets made from it
 export interface EngineResult {
   layers: LayerOut[]; outer: Paths; reg: Pt[]; thin: Paths;
   labelAt?: Pt; // where layer numbers are engraved, when the outline is not a plate
@@ -68,6 +70,16 @@ export function traceLayerPlan(drawn: number, total: number): { src: number; cop
     for (let j = 0; j <= r; j++) plan.push({ src: k, copy: j });
   }
   return plan;
+}
+
+/** Colour areas on a sheet's face, clipped to the sheet. */
+function paintOf(list: { hex: string; rings: Pt[][] }[], material: Paths): { hex: string; paths: Paths }[] {
+  const out: { hex: string; paths: Paths }[] = [];
+  for (const p of list) {
+    const paths = G.inter(G.unionEvenOdd(p.rings.map((r) => G.toPath(r))), G.unionEvenOdd(material));
+    if (paths.length) out.push({ hex: p.hex, paths });
+  }
+  return out;
 }
 
 export function outerShape(s: Settings): Pt[] {
@@ -349,11 +361,14 @@ export async function computeAsync(
           C.memo.set(mk, t as any);
         }
         const L = mkLayer(t.groups, t.islands, t.tops); L.src = k; L.copy = j;
+        if (j === 0 && trace.paint?.[k]?.length) L.paint = paintOf(trace.paint[k], L.material);
         layers.push(L);
       }
     }
     else warnings.push('Upload an image to trace: each flat colour becomes one sheet.');
     layers.push({ material: [outerP, ...regPaths], groups: [{ outer: outerP, holes: regPaths }], islands: 0, cutLength: fixedCut, isBack: true });
+    const bp = trace?.paint?.[trace.openings.length];
+    if (bp?.length) layers[layers.length - 1].paint = paintOf(bp, layers[layers.length - 1].material);
     let thin: Paths = [];
     if (layers.length > 1) {
       const top = layers[0].material;

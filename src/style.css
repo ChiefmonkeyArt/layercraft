@@ -328,3 +328,4 @@ body:not(.guided) .aibadge { order: 8; }
 .gnum { width: 84px; text-align: center; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 6px; font: inherit; font-variant-numeric: tabular-nums; }
 .gidea .gfield { margin-top: 10px; }
 .gidea > .aiinp + .gfield, .gidea input.aiinp { margin-top: 8px; }
+.tsw.small { width: 10px; height: 10px; border-radius: 3px; margin-left: -4px; }

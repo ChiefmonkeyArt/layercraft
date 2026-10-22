@@ -20,6 +20,12 @@ export interface TraceOpts {
   rimMm?: number;           // follow: solid rim around the silhouette, mm
   merge?: number;
   fair?: number;
+  // where the layers come from: 'shapes' = the structure of the picture (each shape sits on the one
+  // around it, whatever its colour), 'colour' = one sheet per colour, 'map' = an AI layer map
+  depth?: 'shapes' | 'colour' | 'map';
+  raise?: 'centre' | 'edge'; // shapes: the middle stands highest (default) or the outside does
+  levels?: number;           // shapes / map: at most this many sheets, back included
+  depthMap?: TraceImage;     // map: a grey layer map of the same area, lighter = higher
   gaps?: 'keep' | 'widen' | 'fill'; // narrow gaps and thin ribs: keep them as drawn and let the laser cut what it can (default), widen them to the minimum, or fill them
   lettering?: { hex: string; font: string; lines: string[]; shapes?: Pt[][][] }; // replace traced letters with font outlines            // curve fairing scale, mm: ripples shorter than this are smoothed into curves (0 = off)           // colours closer than this (ΔE) are one ink; larger for photos of prints
 }
@@ -28,6 +34,8 @@ export interface TraceOut {
   share: number[];          // % of the area per palette colour
   order: number[];          // palette indices, top sheet first; the last one is the back panel
   openings: Pt[][][];       // per cut sheet (all but the back): rings of the openings, mm, centred
+  paint?: { hex: string; rings: Pt[][] }[][]; // per sheet, back included: the other colours on its visible face
+  depthBy?: 'shapes' | 'colour' | 'map';
   pieces: number[];         // loose glue-in pieces per sheet
   outline?: Pt[];           // follow: the outer cut, mm, centred on the image area
   framed?: boolean;         // follow: the artwork has its own frame colour, so no rim was added
@@ -665,10 +673,24 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
     }
     order = best!.ord;
   }
-  const n = order.length;
+  let n = order.length;
   const depth = new Int32Array(Kp).fill(n - 1); order.forEach((c, d) => (depth[c] = d));
   const D = new Int32Array(N);
   for (let i = 0; i < N; i++) D[i] = depth[lbl[i]];
+  // physical layers: from the picture's structure or an AI layer map, not its colours
+  let depthBy: TraceOut['depthBy'] = 'colour';
+  const minPx0 = o.minPiece / (px * px);
+  if (o.depth === 'shapes' || (o.depth === 'map' && o.depthMap)) {
+    progress?.('Finding the layers…');
+    const r = o.depth === 'map' && o.depthMap ? mapDepth(o.depthMap, inside, w, h, o.levels) : shapeDepth(lbl, inside, w, h, minPx0, o.raise ?? 'centre', o.levels);
+    if (r && r.n >= 2) {
+      D.set(r.D); n = r.n; depthBy = o.depth === 'map' ? 'map' : 'shapes';
+      // each sheet's colour: the colour most of its visible face has
+      const cnt = Array.from({ length: n }, () => new Float64Array(Kp));
+      for (let i = 0; i < N; i++) if (inside[i]) cnt[D[i]][lbl[i]]++;
+      order = cnt.map((c) => { let b = 0; for (let k = 1; k < Kp; k++) if (c[k] > c[b]) b = k; return b; });
+    }
+  }
 
   // merge loose pieces that are too small to glue, or thin black outline strokes
   progress?.('Tidying loose pieces…');
@@ -794,7 +816,128 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
     const rings = pxRings.map((r) => r.map(([x, y]) => [(x - 1 + 0.5 - w / 2) * px, (y - 1 + 0.5 - h / 2) * px] as Pt));
     openings.push(rings);
   }
-  return { palette: P.map((c) => { const [r, g, b] = labToRgb(c); return hex(r, g, b); }), share, order, openings, pieces, outline, framed, letterLines, letterWidths, lettered, ms: performance.now() - t0 };
+  const palHex = P.map((c) => { const [r, g, b] = labToRgb(c); return hex(r, g, b); });
+  // the other colours on each sheet's visible face (one sheet may carry several colours)
+  let paint: TraceOut['paint'];
+  if (depthBy !== 'colour') {
+    progress?.('Mapping the colours on each sheet…');
+    paint = [];
+    const minPaint = 1.5 / (px * px), pw = w + 2, ph = h + 2;
+    for (let d = 0; d < n; d++) {
+      const list: { hex: string; rings: Pt[][] }[] = [];
+      for (let c = 0; c < Kp; c++) {
+        if (c === order[d]) continue;
+        let cnt = 0;
+        for (let i = 0; i < N; i++) if (inside[i] && D[i] === d && lbl[i] === c) cnt++;
+        if (cnt < minPaint) continue;
+        const f = new Float32Array(pw * ph).fill(1);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x; if (inside[i] && D[i] === d && lbl[i] === c) f[(y + 1) * pw + x + 1] = 0; }
+        const g = blur(f, pw, ph, sig);
+        for (let x = 0; x < pw; x++) { g[x] = 1; g[(ph - 1) * pw + x] = 1; }
+        for (let y = 0; y < ph; y++) { g[y * pw] = 1; g[y * pw + pw - 1] = 1; }
+        const rings = contours(g, pw, ph).map((r) => rdpClosed(fairRing(smoothRing(r, 1.2), (o.fair ?? 1) / px), 0.03 / px)).filter((r) => r.length >= 3)
+          .map((r) => r.map(([x, y]) => [(x - 1 + 0.5 - w / 2) * px, (y - 1 + 0.5 - h / 2) * px] as Pt));
+        if (rings.length) list.push({ hex: palHex[c], rings });
+      }
+      paint.push(list);
+    }
+  }
+  return { palette: palHex, share, order, openings, pieces, outline, framed, letterLines, letterWidths, lettered, paint, depthBy, ms: performance.now() - t0 };
+}
+
+/**
+ * Layers from the picture's structure: every flat shape sits on the shape around it, whatever its
+ * colour. A shape's height is how many shapes you cross to reach it from the outside; tiny shapes
+ * (less than a glue-in piece) are paint on the shape they sit in, not a sheet of their own.
+ */
+function shapeDepth(lbl: Int32Array, inside: Mask, w: number, h: number, minPx: number, raise: 'centre' | 'edge', levels?: number): { D: Int32Array; n: number } | null {
+  const N = w * h, comp = new Int32Array(N), size: number[] = [0], col: number[] = [-1];
+  let nc = 0; const st: number[] = [];
+  for (let i = 0; i < N; i++) {
+    if (!inside[i] || comp[i]) continue;
+    const c = lbl[i]; nc++; comp[i] = nc; col.push(c); st.push(i); let sz = 0;
+    while (st.length) {
+      const p = st.pop()!; sz++; const x = p % w;
+      for (const q of [x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, p - w, p + w]) if (q >= 0 && q < N && inside[q] && !comp[q] && lbl[q] === c) { comp[q] = nc; st.push(q); }
+    }
+    size.push(sz);
+  }
+  if (nc < 2) return null;
+  const adj: Set<number>[] = Array.from({ length: nc + 1 }, () => new Set<number>());
+  for (let i = 0; i < N; i++) {
+    const a = comp[i], x = i % w;
+    if (x < w - 1) { const b = comp[i + 1]; if (a !== b) { adj[a].add(b); adj[b].add(a); } }
+    if (i + w < N) { const b = comp[i + w]; if (a !== b) { adj[a].add(b); adj[b].add(a); } }
+    if ((x === 0 || x === w - 1 || i < w || i >= N - w) && a) { adj[a].add(0); adj[0].add(a); }
+  }
+  // from the outside in: entering a real shape is one step up; a tiny shape is not a step; a shape
+  // in the colour of the layer around its surroundings is a hole down to that layer (the inside of
+  // an "o" shows the panel the letter sits on), not a step up
+  const dist = new Int32Array(nc + 1).fill(1 << 30); dist[0] = 0;
+  const done = new Uint8Array(nc + 1);
+  const buckets: number[][] = [[0]];
+  for (let lv = 0; lv < buckets.length; lv++) {
+    const bk = buckets[lv];
+    for (let qi = 0; qi < bk.length; qi++) {
+      const u = bk[qi];
+      if (done[u] || dist[u] > lv) continue;
+      done[u] = 1;
+      const du = dist[u];
+      // colours one step below u (what u sits on)
+      const below = new Set<number>();
+      if (u) for (const q of adj[u]) if (q && done[q] && dist[q] === du - 1) below.add(col[q]);
+      for (const v of adj[u]) {
+        if (v === 0 || done[v]) continue;
+        let nd: number;
+        if (u && below.has(col[v])) nd = du - 1; // a hole down to the layer below
+        else nd = du + (u === 0 || size[v] >= minPx ? 1 : 0);
+        nd = Math.max(1, nd);
+        if (nd < dist[v]) {
+          dist[v] = nd;
+          if (nd <= lv) bk.push(v); else (buckets[nd] ??= []).push(v);
+        }
+      }
+    }
+  }
+  let maxd = 1; for (let c = 1; c <= nc; c++) if (dist[c] < 1 << 29 && dist[c] > maxd) maxd = dist[c];
+  // squeeze into the sheets wanted
+  const cap = Math.max(2, Math.min(levels ?? 24, 60));
+  const lv = (d: number) => (maxd > cap ? Math.max(1, Math.ceil((d * cap) / maxd)) : Math.max(1, d));
+  const top = maxd > cap ? cap : maxd;
+  const D = new Int32Array(N).fill(top - 1);
+  for (let i = 0; i < N; i++) {
+    const c = comp[i]; if (!c) continue;
+    const d = lv(Math.min(dist[c], maxd));
+    D[i] = raise === 'centre' ? top - d : d - 1;
+  }
+  return { D, n: top };
+}
+
+/** Layers from a grey layer map: each flat grey is one sheet, lighter is higher. */
+function mapDepth(map: TraceImage, inside: Mask, w: number, h: number, levels?: number): { D: Int32Array; n: number } | null {
+  if (map.w !== w || map.h !== h) return null;
+  const N = w * h, L = new Float32Array(N), hist = new Float64Array(101);
+  let nin = 0;
+  for (let i = 0; i < N; i++) {
+    const v = lab(map.data[i * 4], map.data[i * 4 + 1], map.data[i * 4 + 2])[0];
+    L[i] = v; if (inside[i]) { hist[Math.max(0, Math.min(100, Math.round(v)))]++; nin++; }
+  }
+  const sm = hist.map((_, k) => (hist[k - 2] ?? 0) * 0.5 + (hist[k - 1] ?? 0) + hist[k] * 1.5 + (hist[k + 1] ?? 0) + (hist[k + 2] ?? 0) * 0.5);
+  let peaks: number[] = [];
+  for (let k = 0; k <= 100; k++) if (sm[k] >= (sm[k - 1] ?? 0) && sm[k] > (sm[k + 1] ?? 0) && sm[k] >= nin * 0.004 * 4.5) peaks.push(k);
+  // merge peaks closer than 4 L units
+  peaks.sort((a, b) => sm[b] - sm[a]);
+  const keepP: number[] = [];
+  for (const p of peaks) if (keepP.every((q) => Math.abs(q - p) >= 4)) keepP.push(p);
+  peaks = keepP.slice(0, Math.max(2, levels ?? 60)).sort((a, b) => b - a); // lightest (top) first
+  if (peaks.length < 2) return null;
+  const D = new Int32Array(N), known = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    let b = 0, bd = Infinity; for (let k = 0; k < peaks.length; k++) { const d = Math.abs(L[i] - peaks[k]); if (d < bd) { bd = d; b = k; } }
+    D[i] = b; known[i] = bd <= 3 ? 1 : 0; // in-between greys are anti-aliased edges: take a neighbour's
+  }
+  fillUnknown(D, known, w, h);
+  return { D, n: peaks.length };
 }
 
 function labToRgb([l, a, b]: number[]): [number, number, number] {

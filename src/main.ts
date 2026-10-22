@@ -40,7 +40,7 @@ const S: Settings = {
   detailMode: 'symmetric', detailStart: 2, detailEvery: 2, detailSpacing: 5, detailVariety: 0.75,
   motifs: MOTIFS.map((m) => m.id),
   repeat: 'centre', freeMirror: 'lr', flowEchoes: 4, flowSpacing: 4, scrollSize: 14, scrollGap: 22,
-  traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false, traceFont: '', traceGaps: 'keep', traceLayers: 0, traceDepth: 'extend', traceStepMm: 1.5, traceColourMode: 'picture',
+  traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false, traceFont: '', traceGaps: 'keep', traceLayers: 0, traceDepth: 'extend', traceStepMm: 1.5, traceColourMode: 'picture', traceDepthBy: 'shapes', traceRaise: 'centre',
   corners: false, cornerSize: 0.9, cornerRings: 3, cornerGap: 4.5, cornerCurl: 30, cornerBars: true,
 };
 // Free mode drawing: raw strokes per tool (mirroring is applied when the design is built)
@@ -458,6 +458,8 @@ function setRepeat(v: 'centre' | 'free' | 'trace') {
 // ---------------- trace an image ----------------
 // Upload a flat-colour picture; every colour becomes one sheet at its own depth.
 let traceSrc = '';               // the picture, as a data URL (kept in the project file)
+let depthMapSrc = '';            // an AI layer map of the picture (grey per sheet), as a data URL
+let depthMapEl: HTMLImageElement | null = null;
 let traceName = '';
 let traceCrop: [number, number, number, number] | null = null; // artwork bounding box in the picture (px)
 let traceRes: TraceOut | null = null;
@@ -479,7 +481,9 @@ function traceArea() {
 }
 function traceOpts(): TraceOpts {
   const [wm, hm] = traceArea();
-  return { colours: S.traceLayers && S.traceLayers > 1 ? Math.min(S.traceColours, S.traceLayers) : S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening, gaps: S.traceGaps ?? 'keep',
+  const by = S.traceDepthBy === 'map' && !depthMapSrc ? 'shapes' : (S.traceDepthBy ?? 'colour');
+  return { depth: by, raise: S.traceRaise ?? 'centre', levels: by !== 'colour' && S.traceLayers && S.traceLayers > 1 ? S.traceLayers : undefined,
+    colours: by === 'colour' && S.traceLayers && S.traceLayers > 1 ? Math.min(S.traceColours, S.traceLayers) : S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening, gaps: S.traceGaps ?? 'keep',
     widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded || pictureCheck?.photo ? 16 : 11, fair: S.traceSmooth * ((S.traceGaps ?? 'keep') === 'keep' ? 0.7 : 2), darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined, lettering: letteringOpts() };
 }
 /** Font lettering: the AI check found text and a font is chosen. */
@@ -492,7 +496,7 @@ function letteringOpts(): TraceOpts['lettering'] {
   const n = letterLineCount || c.textLines?.length || 1;
   return { hex: ink.hex, font: S.traceFont, lines: splitLines(c.text, c.textLines, n, letterWidths) };
 }
-const traceKeyOf = (o: TraceOpts) => JSON.stringify([o, traceSrc.length, traceSrc.slice(-64), traceCrop], (k, v) => (k === 'shapes' ? undefined : v));
+const traceKeyOf = (o: TraceOpts) => JSON.stringify([o, traceSrc.length, traceSrc.slice(-64), traceCrop, o.depth === 'map' ? depthMapSrc.length + depthMapSrc.slice(-64) : ''], (k, v) => (k === 'shapes' || k === 'depthMap' ? undefined : v));
 
 function loadImg(src: string): Promise<HTMLImageElement> {
   return new Promise((res, rej) => { const im = new Image(); im.crossOrigin = 'anonymous'; im.onload = () => res(im); im.onerror = () => rej(new Error('Could not read that image')); im.src = src; });
@@ -539,7 +543,7 @@ async function onTraceFile(f: File, demo = false, keepCheck: PictureCheck | null
     // a new picture after the demo is a new project, not an edit of the Daruma
     const wasDemo = !demo && traceName === 'trippy-daruma.webp';
     if (wasDemo) startNew();
-    traceSrc = src; traceName = f.name; traceImgEl = im; pictureCheck = null; checkOrderPending = false; letterLineCount = 0; letterWidths = undefined; S.traceFont = '';
+    traceSrc = src; traceName = f.name; traceImgEl = im; depthMapSrc = ''; depthMapEl = null; if (S.traceDepthBy === 'map') S.traceDepthBy = 'shapes'; pictureCheck = null; checkOrderPending = false; letterLineCount = 0; letterWidths = undefined; S.traceFont = '';
     const carried = keepCheck ? { ...keepCheck, photo: false, kind: 'flat AI redraw' } : null;
     traceCrop = autoCrop(im);
     if (wasDemo || projectName === 'Untitled stack') {
@@ -616,7 +620,7 @@ function fitToArtwork() {
   syncAll();
 }
 /** Pixels of the picture, fitted (cover) to the trace area at a working resolution. */
-async function traceImage(o: TraceOpts) {
+async function traceImage(o: TraceOpts, map?: HTMLImageElement) {
   const im = traceImgEl ?? (traceImgEl = await loadImg(traceSrc));
   if (im.naturalWidth * im.naturalHeight > MAX_IMAGE_PIXELS) throw new Error('too large');
   const long = Math.max(o.widthMm, o.heightMm);
@@ -650,7 +654,12 @@ async function traceImage(o: TraceOpts) {
     x.fillStyle = `rgb(${r},${g},${b})`; x.fillRect(0, 0, w, hh);
   }
   x.imageSmoothingQuality = 'high';
-  x.drawImage(im, cx, cy, cw, ch, (w - dw) / 2, (hh - dh) / 2, dw, dh);
+  if (map) {
+    // the layer map covers the same picture, perhaps at another size: same crop, scaled
+    const fx = map.naturalWidth / im.naturalWidth, fy = map.naturalHeight / im.naturalHeight;
+    x.fillStyle = '#000'; x.fillRect(0, 0, w, hh);
+    x.drawImage(map, cx * fx, cy * fy, cw * fx, ch * fy, (w - dw) / 2, (hh - dh) / 2, dw, dh);
+  } else x.drawImage(im, cx, cy, cw, ch, (w - dw) / 2, (hh - dh) / 2, dw, dh);
   const d = x.getImageData(0, 0, w, hh); // throws if the browser blocks reading the picture
   return { w, h: hh, data: d.data };
 }
@@ -668,6 +677,10 @@ async function runTrace() {
   if (o.lettering) { try { o.lettering.shapes = await lineShapes(o.lettering.font, o.lettering.lines); } catch { o.lettering = undefined; } }
   if (job !== traceJob) return;
   try { img = await traceImage(o); } catch (e: any) { traceBusy = false; setTraceMsg('This browser would not let the app read the picture. Try another image file.'); return; }
+  if (o.depth === 'map' && depthMapSrc) {
+    try { const mp = depthMapEl ?? (depthMapEl = await loadImg(depthMapSrc)); o.depthMap = await traceImage(o, mp); } catch { o.depth = 'shapes'; }
+    if (job !== traceJob) return;
+  }
   const t0 = performance.now();
   const done = (out: TraceOut) => {
     if (job !== traceJob) return;
@@ -686,7 +699,7 @@ async function runTrace() {
       if (ord && ord.join() !== out.order.join()) traceOrder = ord; // the next schedule re-traces in this order
     }
     applyTraceColours();
-    setTraceMsg(`Traced ${out.order.length} colours into ${traceSheetCount()} sheets in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
+    setTraceMsg(`${out.depthBy === 'colour' ? `Traced ${out.palette.filter((_, c) => out.share[c] >= 0.15).length} colours` : `Found ${out.order.length} layers${out.depthBy === 'map' ? ' in the AI layer map' : ' from the shapes'}`} into ${traceSheetCount()} sheets in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
     drawTraceList();
     schedule(0);
     guided?.traced();
@@ -753,9 +766,10 @@ function drawTraceList() {
     const last = d === order.length - 1;
     traceList.append(h('div', { class: 'trow' },
       h('i', { class: 'tsw', style: `background:${pal[c]}` }),
-      h('span', { class: 'tname' }, h('b', {}, last ? 'Back' : `Sheet ${d + 1}`), ` ${share[c]}%`, !last && pieces[d] ? h('em', {}, ` · ${pieces[d]} glue-in`) : null),
-      h('button', { class: 'btn tiny ghost', 'aria-label': `Move ${last ? 'back panel' : 'sheet ' + (d + 1)} colour up`, disabled: d === 0, onclick: () => moveTrace(d, -1) }, '↑'),
-      h('button', { class: 'btn tiny ghost', 'aria-label': `Move ${last ? 'back panel' : 'sheet ' + (d + 1)} colour down`, disabled: last, onclick: () => moveTrace(d, 1) }, '↓'),
+      ...(traceRes!.paint?.[d] ?? []).map((p) => h('i', { class: 'tsw small', style: `background:${p.hex}`, title: 'Also on this sheet' })),
+      h('span', { class: 'tname' }, h('b', {}, last ? 'Back' : `Sheet ${d + 1}`), traceRes!.depthBy === 'colour' ? ` ${share[c]}%` : '', !last && pieces[d] ? h('em', {}, ` · ${pieces[d]} glue-in`) : null),
+      traceRes!.depthBy !== 'colour' ? null : h('button', { class: 'btn tiny ghost', 'aria-label': `Move ${last ? 'back panel' : 'sheet ' + (d + 1)} colour up`, disabled: d === 0, onclick: () => moveTrace(d, -1) }, '↑'),
+      traceRes!.depthBy !== 'colour' ? null : h('button', { class: 'btn tiny ghost', 'aria-label': `Move ${last ? 'back panel' : 'sheet ' + (d + 1)} colour down`, disabled: last, onclick: () => moveTrace(d, 1) }, '↓'),
     ));
   });
 }
@@ -773,7 +787,9 @@ function traceControls(): Node[] {
   setTraceMsg(traceSrc ? traceMsg : 'No image yet.');
   drawTraceList();
   return [
-    h('p', { class: 'note' }, 'Each flat colour in the picture becomes one sheet. The darkest colour is the top face; the deepest is the solid back.'),
+    h('p', { class: 'note' }, S.traceDepthBy === 'colour' ? 'Each flat colour in the picture becomes one sheet. The darkest colour is the top face; the deepest is the solid back.' : 'Sheets come from how the shapes sit on each other; small shapes are colours on the sheet they sit on.'),
+    select('Layers from', () => S.traceDepthBy ?? 'shapes', (v) => { S.traceDepthBy = v as any; buildPanel(); }, [['shapes', 'How pieces sit (shape on shape)'], ['colour', 'One sheet per colour']]),
+    select('Highest part', () => S.traceRaise ?? 'centre', (v) => (S.traceRaise = v as any), [['centre', 'The middle (a mound)'], ['edge', 'The outside (a tunnel)']]),
     h('div', { class: 'tbox' }, thumb, h('div', { class: 'btncol' },
       h('button', { class: 'btn small', onclick: () => fileIn.click() }, traceSrc ? 'Change picture' : 'Upload picture'),
       h('button', { class: 'btn small ghost', onclick: copy }, 'Copy AI redraw prompt'),
@@ -934,7 +950,7 @@ function schedule(delay = 140) {
     pending = true;
     $('#busy').classList.add('on');
     if (!traceFresh()) { pending = false; return; } // the trace finishes first, then schedules again
-    const tr = S.repeat === 'trace' && traceRes ? { sig: traceKey, openings: traceRes.openings, outline: traceRes.outline } : null;
+    const tr = S.repeat === 'trace' && traceRes ? { sig: traceKey, openings: traceRes.openings, outline: traceRes.outline, paint: S.traceColourMode === 'gradient' ? undefined : traceRes.paint } : null;
     runRequest(reqId, { s: JSON.parse(JSON.stringify(S)), sketch, imported, free, trace: tr });
   }, delay);
 }
@@ -1209,14 +1225,14 @@ function showView(v: typeof view) {
 document.querySelectorAll<HTMLButtonElement>('.tabs [data-v]').forEach((b) => b.addEventListener('click', () => showView(b.dataset.v as any)));
 
 function applyProject(d: any) {
-    Object.assign(S, { detailMode: 'off', repeat: 'centre', corners: false, traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false, traceFont: '' }, d.settings); // older projects had no detail layers or Free mode
+    Object.assign(S, { detailMode: 'off', repeat: 'centre', corners: false, traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false, traceFont: '', traceDepthBy: 'colour', traceLayers: 0 }, d.settings); // older projects had no detail layers or Free mode
     free = d.free ?? emptyFree(); freeUndo.length = 0;
     colourway = d.colourway ?? 'natural';
     if (d.colours) { CUSTOM.top = d.colours.top ?? CUSTOM.top; CUSTOM.bottom = d.colours.bottom ?? CUSTOM.bottom; CUSTOM.sheet = { ...(d.colours.sheet ?? d.colours.detail ?? {}) }; }
     colourChanged();
     sketch = d.sketch ?? []; sketchUndo.length = 0; if (sketch.length) sketchUndo.push(sketch.length);
     imported = d.imported ?? []; importName = d.importName ?? '';
-    traceSrc = d.trace?.src ?? ''; traceName = d.trace?.name ?? ''; traceCrop = d.trace?.crop ?? null;
+    traceSrc = d.trace?.src ?? ''; depthMapSrc = typeof d.trace?.depthMap === 'string' && /^data:image\/(png|jpeg|webp);base64,/.test(d.trace.depthMap) ? d.trace.depthMap : ''; depthMapEl = null; traceName = d.trace?.name ?? ''; traceCrop = d.trace?.crop ?? null;
     traceOrder = d.trace?.order ?? null; tracePalette = d.trace?.palette ?? null; traceRes = null; traceKey = ''; traceImgEl = null; pictureInfo = null; pictureCheck = d.trace?.check ?? null; checkOrderPending = false;
     if (traceSrc && (typeof traceSrc !== 'string' || traceSrc.length > MAX_IMAGE_BYTES * 1.4 || !/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(traceSrc))) traceSrc = '';
     if (traceCrop && !(Array.isArray(traceCrop) && traceCrop.length === 4 && traceCrop.every((v) => typeof v === 'number' && isFinite(v)))) traceCrop = null;
@@ -1226,7 +1242,7 @@ function applyProject(d: any) {
     if (traceSrc) { const src = traceSrc; void loadImg(src).then((im) => { if (traceSrc === src) { readPicture(im); guided?.refresh(); } }).catch(() => undefined); }
 }
 const slug = () => projectName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'stack';
-const projectData = () => ({ app: 'layercraft-stack', version: 2, name: projectName, settings: S, colourway, colours: { top: CUSTOM.top, bottom: CUSTOM.bottom, sheet: CUSTOM.sheet }, sketch, imported, importName, free, trace: traceSrc ? { src: traceSrc, name: traceName, crop: traceCrop, order: traceOrder, palette: tracePalette, check: pictureCheck } : null });
+const projectData = () => ({ app: 'layercraft-stack', version: 2, name: projectName, settings: S, colourway, colours: { top: CUSTOM.top, bottom: CUSTOM.bottom, sheet: CUSTOM.sheet }, sketch, imported, importName, free, trace: traceSrc ? { src: traceSrc, name: traceName, crop: traceCrop, order: traceOrder, palette: tracePalette, check: pictureCheck, depthMap: depthMapSrc || undefined } : null });
 
 $('#pname').addEventListener('input', (e) => { projectName = (e.target as HTMLInputElement).value || 'Untitled stack'; touched = true; autosave(); });
 $('#save').addEventListener('click', () => download(new Blob([JSON.stringify(projectData())], { type: 'application/json' }), `${slug()}.layercraft.json`));
