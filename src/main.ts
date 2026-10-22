@@ -1,3 +1,8 @@
+// fonts are bundled with the app (SIL Open Font License); nothing loads from a font CDN
+import '@fontsource-variable/manrope';
+import '@fontsource-variable/bricolage-grotesque';
+import '@fontsource/jetbrains-mono/400.css';
+import '@fontsource/jetbrains-mono/500.css';
 import './style.css';
 import type { Pt } from './geom';
 import { initGeom } from './geom';
@@ -12,12 +17,13 @@ let Stack3DClass: typeof Stack3D | null = null;
 let loading3d = false;
 import { MOTIFS } from './motifs';
 import type { TraceOpts, TraceOut } from './trace';
-import { REDRAW_PROMPT, analysePicture, hexDist, trace as traceNow } from './trace';
+import { LAYER_MAP_PROMPT, REDRAW_PROMPT, analysePicture, hexDist, trace as traceNow } from './trace';
 import type { PictureCheck } from './ai';
 import { lineShapes, pickFont, splitLines } from './lettering';
 import { allLayersSVG, download, exportZip, layerSVG, parseSVG, planSheets, simplify } from './svgio';
 import { createGuided, store } from './guided';
 import { createAiUi } from './aiui';
+import type { SitExample } from './trace';
 import { deleteProject, getProject, listProjects, newId, saveProject } from './projects';
 
 // ---------------- materials ----------------
@@ -460,6 +466,18 @@ function setRepeat(v: 'centre' | 'free' | 'trace') {
 let traceSrc = '';               // the picture, as a data URL (kept in the project file)
 let depthMapSrc = '';            // an AI layer map of the picture (grey per sheet), as a data URL
 let depthMapEl: HTMLImageElement | null = null;
+let depthMapKind: 'flat' | 'photo' = 'flat'; // an AI layer map (flat greys) or depth read from the photo
+let traceFixes: { u: number; v: number; a: number }[] = []; // corrections: a point (0..1) and how that shape sits
+let fixMode = false;                  // tap a shape in the preview to correct its layer
+// ---- the learning engine: corrections teach how shapes sit, kept on this device only ----
+const LEARN_KEY = 'lc.learn.v1';
+type LearnStore = { ex: Record<string, SitExample> };
+const learnLoad = (): LearnStore => { try { const d = JSON.parse(store.get(LEARN_KEY) ?? ''); return d && typeof d.ex === 'object' ? d : { ex: {} }; } catch { return { ex: {} }; } };
+let learnStore = learnLoad();
+const learnSave = () => store.set(LEARN_KEY, JSON.stringify(learnStore));
+const picKey = () => { let x = 0; const t = traceSrc; for (let i = 0; i < t.length; i += Math.max(1, t.length >> 12)) x = (x * 31 + t.charCodeAt(i)) | 0; return `p${t.length.toString(36)}${(x >>> 0).toString(36)}`; };
+const learnFromOthers = (): SitExample[] => { const k = picKey() + ':'; return Object.entries(learnStore.ex).filter(([key]) => !key.startsWith(k)).map(([, v]) => v).slice(-400); };
+const learnCount = () => Object.keys(learnStore.ex).length;
 let traceName = '';
 let traceCrop: [number, number, number, number] | null = null; // artwork bounding box in the picture (px)
 let traceRes: TraceOut | null = null;
@@ -482,7 +500,7 @@ function traceArea() {
 function traceOpts(): TraceOpts {
   const [wm, hm] = traceArea();
   const by = S.traceDepthBy === 'map' && !depthMapSrc ? 'shapes' : (S.traceDepthBy ?? 'colour');
-  return { depth: by, raise: S.traceRaise ?? 'centre', levels: by !== 'colour' && S.traceLayers && S.traceLayers > 1 ? S.traceLayers : undefined,
+  return { depth: by, raise: S.traceRaise ?? 'centre', mapKind: depthMapKind, learn: by === 'shapes' ? learnFromOthers() : undefined, fixes: by === 'shapes' && traceFixes.length ? traceFixes : undefined, levels: by !== 'colour' && S.traceLayers && S.traceLayers > 1 ? S.traceLayers : undefined,
     colours: by === 'colour' && S.traceLayers && S.traceLayers > 1 ? Math.min(S.traceColours, S.traceLayers) : S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening, gaps: S.traceGaps ?? 'keep',
     widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded || pictureCheck?.photo ? 16 : 11, fair: S.traceSmooth * ((S.traceGaps ?? 'keep') === 'keep' ? 0.7 : 2), darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined, lettering: letteringOpts() };
 }
@@ -543,7 +561,7 @@ async function onTraceFile(f: File, demo = false, keepCheck: PictureCheck | null
     // a new picture after the demo is a new project, not an edit of the Daruma
     const wasDemo = !demo && traceName === 'trippy-daruma.webp';
     if (wasDemo) startNew();
-    traceSrc = src; traceName = f.name; traceImgEl = im; depthMapSrc = ''; depthMapEl = null; if (S.traceDepthBy === 'map') S.traceDepthBy = 'shapes'; pictureCheck = null; checkOrderPending = false; letterLineCount = 0; letterWidths = undefined; S.traceFont = '';
+    traceSrc = src; traceName = f.name; traceImgEl = im; depthMapSrc = ''; depthMapEl = null; traceFixes = []; fixMode = false; if (S.traceDepthBy === 'map') S.traceDepthBy = 'shapes'; pictureCheck = null; checkOrderPending = false; letterLineCount = 0; letterWidths = undefined; S.traceFont = '';
     const carried = keepCheck ? { ...keepCheck, photo: false, kind: 'flat AI redraw' } : null;
     traceCrop = autoCrop(im);
     if (wasDemo || projectName === 'Untitled stack') {
@@ -687,6 +705,13 @@ async function runTrace() {
     traceBusy = false;
     traceRes = out;
     tracePalette = out.palette;
+    // learn from this picture's corrections (the clues the tracer saw at each one)
+    if (out.fixFeat && o.fixes) {
+      const k = picKey() + ':';
+      for (const key of Object.keys(learnStore.ex)) if (key.startsWith(k)) delete learnStore.ex[key];
+      o.fixes.forEach((fx, i) => { const f = out.fixFeat![i]; if (f) learnStore.ex[k + i] = { f, a: fx.a }; });
+      learnSave();
+    }
     traceKey = traceKeyOf(traceOpts());
     // the picture has a different number of lettering lines than guessed: split again and re-trace
     if (out.letterLines && o.lettering && !out.lettered && out.letterLines !== letterLineCount) { letterLineCount = out.letterLines; letterWidths = out.letterWidths; }
@@ -699,7 +724,7 @@ async function runTrace() {
       if (ord && ord.join() !== out.order.join()) traceOrder = ord; // the next schedule re-traces in this order
     }
     applyTraceColours();
-    setTraceMsg(`${out.depthBy === 'colour' ? `Traced ${out.palette.filter((_, c) => out.share[c] >= 0.15).length} colours` : `Found ${out.order.length} layers${out.depthBy === 'map' ? ' in the AI layer map' : ' from the shapes'}`} into ${traceSheetCount()} sheets in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
+    setTraceMsg(`${out.depthBy === 'colour' ? `Traced ${out.palette.filter((_, c) => out.share[c] >= 0.15).length} colours` : `Found ${out.order.length} layers${out.depthBy === 'map' ? (depthMapKind === 'photo' ? ' in the photo’s depth' : ' in the AI layer map') : ' from the shapes'}`} into ${traceSheetCount()} sheets in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
     drawTraceList();
     schedule(0);
     guided?.traced();
@@ -765,8 +790,8 @@ function drawTraceList() {
   order.forEach((c, d) => {
     const last = d === order.length - 1;
     traceList.append(h('div', { class: 'trow' },
-      h('i', { class: 'tsw', style: `background:${pal[c]}` }),
-      ...(traceRes!.paint?.[d] ?? []).map((p) => h('i', { class: 'tsw small', style: `background:${p.hex}`, title: 'Also on this sheet' })),
+      h('span', { class: 'tsws' }, h('i', { class: 'tsw', style: `background:${pal[c]}` }),
+        ...(traceRes!.paint?.[d] ?? []).slice(0, 6).map((p) => h('i', { class: 'tsw small', style: `background:${p.hex}`, title: 'Also on this sheet' }))),
       h('span', { class: 'tname' }, h('b', {}, last ? 'Back' : `Sheet ${d + 1}`), traceRes!.depthBy === 'colour' ? ` ${share[c]}%` : '', !last && pieces[d] ? h('em', {}, ` · ${pieces[d]} glue-in`) : null),
       traceRes!.depthBy !== 'colour' ? null : h('button', { class: 'btn tiny ghost', 'aria-label': `Move ${last ? 'back panel' : 'sheet ' + (d + 1)} colour up`, disabled: d === 0, onclick: () => moveTrace(d, -1) }, '↑'),
       traceRes!.depthBy !== 'colour' ? null : h('button', { class: 'btn tiny ghost', 'aria-label': `Move ${last ? 'back panel' : 'sheet ' + (d + 1)} colour down`, disabled: last, onclick: () => moveTrace(d, 1) }, '↓'),
@@ -1184,7 +1209,33 @@ cv.addEventListener('pointermove', (e) => {
   else return;
   redraw();
 });
+let tapAt: { x: number; y: number; t: number } | null = null;
+cv.addEventListener('pointerdown', (e) => { tapAt = { x: e.clientX, y: e.clientY, t: performance.now() }; }, true);
+const fixMenu = h('div', { class: 'fixmenu', hidden: true, role: 'menu' });
+$('#viewport').append(fixMenu);
+function openFixMenu(e: PointerEvent) {
+  const g = traceRes?.grid; if (!g) return;
+  const [mx, my] = screenToMm(cv, S, e.clientX, e.clientY);
+  const u = mx / (g.w * g.px) + 0.5, v = my / (g.h * g.px) + 0.5;
+  if (u < 0 || u > 1 || v < 0 || v > 1) return;
+  const vr = $('#viewport').getBoundingClientRect();
+  fixMenu.innerHTML = '';
+  const pick = (a: number) => {
+    fixMenu.hidden = true;
+    traceFixes = [...traceFixes.filter((f) => Math.hypot(f.u - u, f.v - v) > 0.004), { u, v, a }];
+    toast('Got it. Re-tracing, and learning for next time…'); touched = true; schedule(0);
+  };
+  fixMenu.append(h('b', {}, 'This shape sits…'),
+    h('button', { class: 'btn small', role: 'menuitem', onclick: () => pick(0) }, 'Higher than around it'),
+    h('button', { class: 'btn small', role: 'menuitem', onclick: () => pick(1) }, 'On the same sheet (paint)'),
+    h('button', { class: 'btn small', role: 'menuitem', onclick: () => pick(2) }, 'Lower (a hole)'),
+    h('button', { class: 'btn small ghost', onclick: () => { fixMenu.hidden = true; } }, 'Cancel'));
+  fixMenu.style.left = `${Math.min(vr.width - 230, Math.max(8, e.clientX - vr.left + 10))}px`;
+  fixMenu.style.top = `${Math.min(vr.height - 190, Math.max(8, e.clientY - vr.top + 10))}px`;
+  fixMenu.hidden = false;
+}
 const endPtr = (e: PointerEvent) => {
+  if (fixMode && view === 'stack' && tapAt && ptrs.size <= 1 && Math.hypot(e.clientX - tapAt.x, e.clientY - tapAt.y) < 6 && performance.now() - tapAt.t < 600) openFixMenu(e);
   ptrs.delete(e.pointerId);
   if (ptrs.size < 2) pinch = null;
   if (ptrs.size) return;
@@ -1232,7 +1283,7 @@ function applyProject(d: any) {
     colourChanged();
     sketch = d.sketch ?? []; sketchUndo.length = 0; if (sketch.length) sketchUndo.push(sketch.length);
     imported = d.imported ?? []; importName = d.importName ?? '';
-    traceSrc = d.trace?.src ?? ''; depthMapSrc = typeof d.trace?.depthMap === 'string' && /^data:image\/(png|jpeg|webp);base64,/.test(d.trace.depthMap) ? d.trace.depthMap : ''; depthMapEl = null; traceName = d.trace?.name ?? ''; traceCrop = d.trace?.crop ?? null;
+    traceSrc = d.trace?.src ?? ''; depthMapSrc = typeof d.trace?.depthMap === 'string' && /^data:image\/(png|jpeg|webp);base64,/.test(d.trace.depthMap) ? d.trace.depthMap : ''; depthMapEl = null; depthMapKind = d.trace?.depthMapKind === 'photo' ? 'photo' : 'flat'; traceFixes = Array.isArray(d.trace?.fixes) ? d.trace.fixes.filter((f: any) => f && isFinite(f.u) && isFinite(f.v) && [0, 1, 2].includes(f.a)).slice(0, 200) : []; fixMode = false; traceName = d.trace?.name ?? ''; traceCrop = d.trace?.crop ?? null;
     traceOrder = d.trace?.order ?? null; tracePalette = d.trace?.palette ?? null; traceRes = null; traceKey = ''; traceImgEl = null; pictureInfo = null; pictureCheck = d.trace?.check ?? null; checkOrderPending = false;
     if (traceSrc && (typeof traceSrc !== 'string' || traceSrc.length > MAX_IMAGE_BYTES * 1.4 || !/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(traceSrc))) traceSrc = '';
     if (traceCrop && !(Array.isArray(traceCrop) && traceCrop.length === 4 && traceCrop.every((v) => typeof v === 'number' && isFinite(v)))) traceCrop = null;
@@ -1242,7 +1293,7 @@ function applyProject(d: any) {
     if (traceSrc) { const src = traceSrc; void loadImg(src).then((im) => { if (traceSrc === src) { readPicture(im); guided?.refresh(); } }).catch(() => undefined); }
 }
 const slug = () => projectName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'stack';
-const projectData = () => ({ app: 'layercraft-stack', version: 2, name: projectName, settings: S, colourway, colours: { top: CUSTOM.top, bottom: CUSTOM.bottom, sheet: CUSTOM.sheet }, sketch, imported, importName, free, trace: traceSrc ? { src: traceSrc, name: traceName, crop: traceCrop, order: traceOrder, palette: tracePalette, check: pictureCheck, depthMap: depthMapSrc || undefined } : null });
+const projectData = () => ({ app: 'layercraft-stack', version: 2, name: projectName, settings: S, colourway, colours: { top: CUSTOM.top, bottom: CUSTOM.bottom, sheet: CUSTOM.sheet }, sketch, imported, importName, free, trace: traceSrc ? { src: traceSrc, name: traceName, crop: traceCrop, order: traceOrder, palette: tracePalette, check: pictureCheck, depthMap: depthMapSrc || undefined, depthMapKind, fixes: traceFixes.length ? traceFixes : undefined } : null });
 
 $('#pname').addEventListener('input', (e) => { projectName = (e.target as HTMLInputElement).value || 'Untitled stack'; touched = true; autosave(); });
 $('#save').addEventListener('click', () => download(new Blob([JSON.stringify(projectData())], { type: 'application/json' }), `${slug()}.layercraft.json`));
@@ -1371,6 +1422,43 @@ async function loadDemo() {
     await onTraceFile(f, true);
   } catch { toast('Could not load the demo picture'); }
 }
+/** Depth from the photo on this device (Depth Anything V2 Small, served by this site). */
+let depthWorker: Worker | null = null;
+async function readDepth(onMsg: (m: string) => void): Promise<boolean> {
+  if (!traceSrc) return false;
+  const im = traceImgEl ?? (traceImgEl = await loadImg(traceSrc));
+  const k = Math.min(1, 1024 / Math.max(im.naturalWidth, im.naturalHeight));
+  const w = Math.max(1, Math.round(im.naturalWidth * k)), hh = Math.max(1, Math.round(im.naturalHeight * k));
+  const c = document.createElement('canvas'); c.width = w; c.height = hh;
+  const x = c.getContext('2d')!; x.drawImage(im, 0, 0, w, hh);
+  const data = x.getImageData(0, 0, w, hh).data;
+  depthWorker ??= new Worker(new URL('./depth.worker.ts', import.meta.url), { type: 'module' });
+  onMsg('Loading the depth model (27 MB, once)…');
+  const out = await new Promise<{ w: number; h: number; depth: Uint8Array } | null>((res) => {
+    depthWorker!.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'progress') onMsg(`Loading the depth model… ${Math.round((100 * m.loaded) / m.total)}%`);
+      else if (m.type === 'status') onMsg(m.text);
+      else if (m.type === 'done') res(m);
+      else if (m.type === 'error') { console.warn('depth', m.stack); toast(`Could not read the depth: ${m.text}`); res(null); }
+    };
+    depthWorker!.onerror = (e) => { toast(`Could not read the depth: ${e.message}`); res(null); };
+    depthWorker!.postMessage({ w, h: hh, data, base: new URL('./', location.href).href });
+  });
+  if (!out) return false;
+  // grey image the same size as the picture (lighter = nearer = higher)
+  const g = document.createElement('canvas'); g.width = out.w; g.height = out.h;
+  const gx = g.getContext('2d')!, id = gx.createImageData(out.w, out.h);
+  const ch = out.depth.length / (out.w * out.h);
+  for (let i = 0; i < out.w * out.h; i++) { const v = out.depth[i * ch]; id.data[i * 4] = id.data[i * 4 + 1] = id.data[i * 4 + 2] = v; id.data[i * 4 + 3] = 255; }
+  gx.putImageData(id, 0, 0);
+  // scale to the picture's own size so the trace lines it up the same way
+  const full = document.createElement('canvas'); full.width = im.naturalWidth; full.height = im.naturalHeight;
+  const fx = full.getContext('2d')!; fx.imageSmoothingQuality = 'high'; fx.drawImage(g, 0, 0, full.width, full.height);
+  depthMapSrc = full.toDataURL('image/png'); depthMapEl = null; depthMapKind = 'photo'; S.traceDepthBy = 'map'; touched = true;
+  syncAll(); schedule(0); buildPanel();
+  return true;
+}
 const aiUi = createAiUi(h, toast);
 $('#mode').before(aiUi.badge);
 guided = createGuided({
@@ -1393,6 +1481,20 @@ guided = createGuided({
   autoOrder: () => { traceOrder = null; schedule(0); },
   colourPanel,
   redrawPrompt: () => REDRAW_PROMPT(S.traceColours, pictureCheck),
+  layerMapPrompt: () => LAYER_MAP_PROMPT(S.traceLayers && S.traceLayers > 1 ? S.traceLayers : 0, pictureCheck),
+  layerMap: () => (depthMapSrc ? { src: depthMapSrc, kind: depthMapKind } : null),
+  useLayerMap: async (url: string, kind: 'flat' | 'photo') => {
+    const b = await (await fetch(url)).blob();
+    const src = await new Promise<string>((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.onerror = rej; r.readAsDataURL(b); });
+    depthMapSrc = src; depthMapEl = null; depthMapKind = kind; S.traceDepthBy = 'map'; touched = true; syncAll(); schedule(0); buildPanel();
+  },
+  readDepth: (onMsg: (m: string) => void) => readDepth(onMsg),
+  fixMode: () => fixMode,
+  setFixMode: (on: boolean) => { fixMode = on; fixMenu.hidden = true; if (on) showView('stack'); },
+  fixCount: () => traceFixes.length,
+  clearFixes: () => { traceFixes = []; fixMenu.hidden = true; schedule(0); },
+  learnCount,
+  forgetLearning: () => { learnStore = { ex: {} }; learnSave(); schedule(0); },
   setMaterial: (v) => { S.material = v; Object.assign(S, MATERIALS[v].s); },
   fitToArtwork,
   showView,

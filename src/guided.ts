@@ -31,6 +31,16 @@ export interface GuidedApi {
   autoOrder: () => void;
   colourPanel: () => HTMLElement;
   redrawPrompt: () => string;
+  layerMapPrompt: () => string;
+  layerMap: () => { src: string; kind: 'flat' | 'photo' } | null;
+  useLayerMap: (url: string, kind: 'flat' | 'photo') => Promise<void>;
+  readDepth: (onMsg: (m: string) => void) => Promise<boolean>;
+  fixMode: () => boolean;
+  setFixMode: (on: boolean) => void;
+  fixCount: () => number;
+  clearFixes: () => void;
+  learnCount: () => number;
+  forgetLearning: () => void;
   setMaterial: (id: string) => void;
   fitToArtwork: () => void;
   showView: (v: View) => void;
@@ -99,6 +109,31 @@ export function createGuided(api: GuidedApi) {
     if (url) { await api.usePicture(url, `${(p.name || 'picture').replace(/\.[a-z]+$/i, '')}-flat.png`, true); api.toast('Flat redraw ready. Compare it with the trace, or press Next.'); }
     busy('');
     draw();
+  }
+  /** AI layer map: Nano Banana Pro paints one grey per physical sheet. */
+  async function makeLayerMap() {
+    const p = api.picture();
+    const im = await new Promise<HTMLImageElement>((res) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => res(i); i.src = p.src; });
+    const url = await api.ai.create(api.layerMapPrompt(), p.src, nearestAspect(im.naturalWidth || 3, im.naturalHeight || 4), () => busy(`Mapping the layers with ${api.ai.flat.label()}…`), api.ai.flat.model());
+    if (url) { await api.useLayerMap(url, 'flat'); api.toast('Layer map ready. The sheets now follow it.'); }
+    busy(''); draw();
+  }
+  async function depthFromPhoto() {
+    busy('Loading the depth model…');
+    const ok = await api.readDepth((m) => busy(m));
+    busy('');
+    if (ok) api.toast('Depth read on this device. The sheets now follow it.');
+    draw();
+  }
+  function layerHelp() {
+    const m = api.layerMap();
+    return h('details', { class: 'gmore' }, h('summary', {}, m ? 'Layer map in use' : 'Better layers for photos and complex art'),
+      m ? h('div', { class: 'tbox' }, h('img', { class: 'tthumb', src: m.src, alt: 'Layer map: lighter is higher' }),
+        h('p', { class: 'note' }, m.kind === 'photo' ? 'Depth read from the photo on this device. Lighter is higher.' : 'AI layer map: one grey per sheet, lighter is higher.')) : null,
+      h('p', { class: 'note' }, 'An AI layer map paints each physical sheet one grey, from how the pieces sit, not their colours.'),
+      aiButton('Make an AI layer map', makeLayerMap, api.ai.flat.cost, ''),
+      h('p', { class: 'note' }, 'For a photo of a real layered piece, read its depth here on your device instead. Free; the 27 MB model downloads from this site once and your picture is never uploaded.'),
+      h('button', { class: 'btn aibtn', disabled: busyMsg ? true : undefined, onclick: () => { if (!busyMsg) void depthFromPhoto(); } }, 'Read depth from the photo'));
   }
   const isRedraw = () => /-flat\.png$/i.test(api.picture().name || '');
   /** Photos and shaded art: the recommended first step is the AI flat redraw. */
@@ -289,8 +324,11 @@ export function createGuided(api: GuidedApi) {
     { id: 'trace', label: 'Trace', view: 'stack', needsPicture: true, body: () => [
       h('h2', {}, 'Trace and outline'),
       lead('Layers come from how the shapes sit on each other, not just their colours. One sheet can carry several colours.'),
-      chips<string>('Layers from', [['shapes', 'How pieces sit', 'shape on shape'], ['colour', 'Colours', 'one sheet each']], () => (S.traceDepthBy === 'colour' ? 'colour' : 'shapes'),
-        (v) => { S.traceDepthBy = v as Settings['traceDepthBy']; api.changed(true); }),
+      chips<string>('Layers from', [['shapes', 'How pieces sit', 'shape on shape'], ['colour', 'Colours', 'one sheet each'],
+        ...(api.layerMap() ? [['map', 'Layer map', api.layerMap()!.kind === 'photo' ? 'photo depth' : 'AI greys'] as [string, string, string]] : [])],
+        () => (S.traceDepthBy === 'colour' ? 'colour' : S.traceDepthBy === 'map' && api.layerMap() ? 'map' : 'shapes'),
+        (v) => { S.traceDepthBy = v as Settings['traceDepthBy']; api.changed(true); draw(); }),
+      layerHelp(),
       ...(S.traceDepthBy !== 'colour' ? [chips<string>('Highest', [['centre', 'Middle', 'a mound'], ['edge', 'Outside', 'a tunnel']], () => S.traceRaise ?? 'centre', (v) => { S.traceRaise = v as Settings['traceRaise']; api.changed(); })] : []),
       (() => {
         const info = api.pictureInfo();
@@ -309,7 +347,7 @@ export function createGuided(api: GuidedApi) {
     ] },
     { id: 'layers', label: 'Layers', view: '3d', needsPicture: true, body: () => {
       api.drawTraceList();
-      return [
+      return ([
         h('h2', {}, 'Layers'),
         lead(S.traceDepthBy === 'colour' ? 'The top sheet is first. Move a colour up or down to change its depth. Drag the 3D view to look around.' : 'The top sheet is first, with the colours on each. Drag the 3D view to look around.'),
         chips('Material', [['birch', 'Birch ply', '3 mm'], ['paper', 'Card', '0.4 mm']], () => (S.material === 'paper' ? 'paper' : 'birch'), (v) => { api.setMaterial(v); api.changed(); }),
@@ -321,9 +359,19 @@ export function createGuided(api: GuidedApi) {
             () => `${depthNote(get())} ${get() > colours() ? `${colours()} traced colours; the other sheets extend or repeat them.` : get() < colours() ? 'Fewer sheets than colours: similar colours are merged.' : 'One sheet per colour.'}`);
           return h('div', {}, f, extra);
         })(),
+        S.traceDepthBy !== 'colour' ? (() => {
+          const on = api.fixMode();
+          const n = api.learnCount();
+          return h('div', { class: 'gfield' }, h('div', { class: 'glab' }, 'Fix a layer'),
+            h('button', { class: `btn ${on ? 'primary' : ''}`, 'aria-pressed': on ? 'true' : 'false', onclick: () => { api.setFixMode(!on); draw(); } }, on ? 'Done fixing' : 'Tap a shape to fix it'),
+            h('p', { class: 'note' }, on ? 'Tap any shape in the preview and say how it sits. Similar shapes follow, and the app remembers for your next pictures.' : 'Wrong sheet somewhere? Correct it, and the app learns from you.'),
+            h('p', { class: 'note' }, `${api.fixCount() ? `${api.fixCount()} fixes on this picture. ` : ''}${n ? `Learnt from ${n} fix${n === 1 ? '' : 'es'}, stored only in this browser.` : ''}`),
+            api.fixCount() ? h('button', { class: 'btn small ghost', onclick: () => { api.clearFixes(); draw(); } }, 'Undo fixes on this picture') : null,
+            n ? h('button', { class: 'btn small ghost', onclick: () => { if (confirm('Forget everything the app has learnt from your fixes?')) { api.forgetLearning(); draw(); } } }, 'Forget what it learnt') : null);
+        })() : null,
         h('div', { class: 'gfield' }, h('div', { class: 'glab' }, 'Order, top to bottom'), api.traceList,
           S.traceDepthBy === 'colour' ? h('button', { class: 'btn small ghost', onclick: () => api.autoOrder() }, 'Auto order (fewest loose pieces)') : null),
-      ];
+      ] as (Node | null)[]).filter((x): x is Node => !!x);
     } },
     { id: 'details', label: 'Details', view: 'layers', needsPicture: true, body: () => [
       h('h2', {}, 'Details'),

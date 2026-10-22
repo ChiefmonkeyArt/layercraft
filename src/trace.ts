@@ -26,6 +26,9 @@ export interface TraceOpts {
   raise?: 'centre' | 'edge'; // shapes: the middle stands highest (default) or the outside does
   levels?: number;           // shapes / map: at most this many sheets, back included
   depthMap?: TraceImage;     // map: a grey layer map of the same area, lighter = higher
+  mapKind?: 'flat' | 'photo'; // flat greys (AI layer map) or smooth depth read from a photo
+  learn?: SitExample[];      // corrections from other pictures (the learning engine)
+  fixes?: { u: number; v: number; a: number }[]; // corrections on this picture: a point (0..1) and how that shape sits
   gaps?: 'keep' | 'widen' | 'fill'; // narrow gaps and thin ribs: keep them as drawn and let the laser cut what it can (default), widen them to the minimum, or fill them
   lettering?: { hex: string; font: string; lines: string[]; shapes?: Pt[][][] }; // replace traced letters with font outlines            // curve fairing scale, mm: ripples shorter than this are smoothed into curves (0 = off)           // colours closer than this (ΔE) are one ink; larger for photos of prints
 }
@@ -36,6 +39,8 @@ export interface TraceOut {
   openings: Pt[][][];       // per cut sheet (all but the back): rings of the openings, mm, centred
   paint?: { hex: string; rings: Pt[][] }[][]; // per sheet, back included: the other colours on its visible face
   depthBy?: 'shapes' | 'colour' | 'map';
+  fixFeat?: (number[] | null)[]; // per correction: the clues the model saw (to learn from)
+  grid?: { w: number; h: number; px: number }; // the traced raster: size and mm per pixel
   pieces: number[];         // loose glue-in pieces per sheet
   outline?: Pt[];           // follow: the outer cut, mm, centred on the image area
   framed?: boolean;         // follow: the artwork has its own frame colour, so no rim was added
@@ -679,10 +684,14 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
   for (let i = 0; i < N; i++) D[i] = depth[lbl[i]];
   // physical layers: from the picture's structure or an AI layer map, not its colours
   let depthBy: TraceOut['depthBy'] = 'colour';
+  let fixFeat: (number[] | null)[] | undefined;
   const minPx0 = o.minPiece / (px * px);
   if (o.depth === 'shapes' || (o.depth === 'map' && o.depthMap)) {
     progress?.('Finding the layers…');
-    const r = o.depth === 'map' && o.depthMap ? mapDepth(o.depthMap, inside, w, h, o.levels) : shapeDepth(lbl, inside, w, h, minPx0, o.raise ?? 'centre', o.levels);
+    const fixes = (o.fixes ?? []).map((f) => ({ i: Math.min(h - 1, Math.max(0, Math.floor(f.v * h))) * w + Math.min(w - 1, Math.max(0, Math.floor(f.u * w))), a: f.a }));
+    const r = o.depth === 'map' && o.depthMap ? mapDepth(lbl, o.depthMap, inside, w, h, minPx0, o.mapKind ?? 'flat', o.levels)
+      : shapeDepth(lbl, inside, w, h, minPx0, o.raise ?? 'centre', o.levels, P, px, o.learn ?? [], fixes);
+    if (r && 'fixFeat' in r) fixFeat = (r as { fixFeat: (number[] | null)[] }).fixFeat;
     if (r && r.n >= 2) {
       D.set(r.D); n = r.n; depthBy = o.depth === 'map' ? 'map' : 'shapes';
       // each sheet's colour: the colour most of its visible face has
@@ -842,15 +851,13 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
       paint.push(list);
     }
   }
-  return { palette: palHex, share, order, openings, pieces, outline, framed, letterLines, letterWidths, lettered, paint, depthBy, ms: performance.now() - t0 };
+  return { palette: palHex, share, order, openings, pieces, outline, framed, letterLines, letterWidths, lettered, paint, depthBy, fixFeat, grid: { w, h, px }, ms: performance.now() - t0 };
 }
 
-/**
- * Layers from the picture's structure: every flat shape sits on the shape around it, whatever its
- * colour. A shape's height is how many shapes you cross to reach it from the outside; tiny shapes
- * (less than a glue-in piece) are paint on the shape they sit in, not a sheet of their own.
- */
-function shapeDepth(lbl: Int32Array, inside: Mask, w: number, h: number, minPx: number, raise: 'centre' | 'edge', levels?: number): { D: Int32Array; n: number } | null {
+// ---------- physical layers ----------
+/** The flat shapes of the picture (same-colour 4-connected regions) and which touch which. */
+interface ShapeGraph { comp: Int32Array; nc: number; size: number[]; col: number[]; per: number[]; adj: Set<number>[] }
+function shapeGraph(lbl: Int32Array, inside: Mask, w: number, h: number): ShapeGraph {
   const N = w * h, comp = new Int32Array(N), size: number[] = [0], col: number[] = [-1];
   let nc = 0; const st: number[] = [];
   for (let i = 0; i < N; i++) {
@@ -862,82 +869,212 @@ function shapeDepth(lbl: Int32Array, inside: Mask, w: number, h: number, minPx: 
     }
     size.push(sz);
   }
-  if (nc < 2) return null;
+  const per = new Array(nc + 1).fill(0);
   const adj: Set<number>[] = Array.from({ length: nc + 1 }, () => new Set<number>());
   for (let i = 0; i < N; i++) {
     const a = comp[i], x = i % w;
-    if (x < w - 1) { const b = comp[i + 1]; if (a !== b) { adj[a].add(b); adj[b].add(a); } }
-    if (i + w < N) { const b = comp[i + w]; if (a !== b) { adj[a].add(b); adj[b].add(a); } }
-    if ((x === 0 || x === w - 1 || i < w || i >= N - w) && a) { adj[a].add(0); adj[0].add(a); }
+    if (x < w - 1) { const b = comp[i + 1]; if (a !== b) { adj[a].add(b); adj[b].add(a); per[a]++; per[b]++; } }
+    if (i + w < N) { const b = comp[i + w]; if (a !== b) { adj[a].add(b); adj[b].add(a); per[a]++; per[b]++; } }
+    if ((x === 0 || x === w - 1 || i < w || i >= N - w) && a) { adj[a].add(0); adj[0].add(a); per[a]++; }
   }
-  // from the outside in: entering a real shape is one step up; a tiny shape is not a step; a shape
-  // in the colour of the layer around its surroundings is a hole down to that layer (the inside of
-  // an "o" shows the panel the letter sits on), not a step up
-  const dist = new Int32Array(nc + 1).fill(1 << 30); dist[0] = 0;
-  const done = new Uint8Array(nc + 1);
-  const buckets: number[][] = [[0]];
-  for (let lv = 0; lv < buckets.length; lv++) {
-    const bk = buckets[lv];
-    for (let qi = 0; qi < bk.length; qi++) {
-      const u = bk[qi];
-      if (done[u] || dist[u] > lv) continue;
-      done[u] = 1;
-      const du = dist[u];
-      // colours one step below u (what u sits on)
-      const below = new Set<number>();
-      if (u) for (const q of adj[u]) if (q && done[q] && dist[q] === du - 1) below.add(col[q]);
-      for (const v of adj[u]) {
-        if (v === 0 || done[v]) continue;
-        let nd: number;
-        if (u && below.has(col[v])) nd = du - 1; // a hole down to the layer below
-        else nd = du + (u === 0 || size[v] >= minPx ? 1 : 0);
-        nd = Math.max(1, nd);
-        if (nd < dist[v]) {
-          dist[v] = nd;
-          if (nd <= lv) bk.push(v); else (buckets[nd] ??= []).push(v);
+  return { comp, nc, size, col, per, adj };
+}
+
+/**
+ * How a shape sits on the shape around it: 0 = one sheet higher, 1 = on the same sheet (paint),
+ * 2 = one sheet lower (a hole). A small linear model over picture-independent clues; the defaults
+ * are the built-in rules and the user's corrections retrain it.
+ */
+export const SIT_FEATURES = 9;
+export const SIT_DEFAULT: number[][] = [
+  // bias, small, hole, lighter, dark, thin, size ratio, chroma diff, many neighbours
+  [1, 0, 0, 0, 0, 0, 0, 0, 0],   // higher
+  [0, 3, 0, 0, 0, 0, 0, 0, 0],   // same sheet
+  [0, 0, 5, 0, 0, 0, 0, 0, 0],   // lower
+];
+export interface SitExample { f: number[]; a: number }
+/** Retrain the model from corrections: start at the rules, nudge until every correction is met. */
+export function trainSit(ex: SitExample[]): number[][] {
+  const W = SIT_DEFAULT.map((r) => r.slice());
+  if (!ex.length) return W;
+  for (let ep = 0; ep < 120; ep++) {
+    let bad = 0;
+    for (const { f, a } of ex) {
+      const sc = W.map((r) => r.reduce((t, v, k) => t + v * (f[k] ?? 0), 0));
+      // the wanted action must win by a margin of 1
+      let rival = -1; for (let k = 0; k < 3; k++) if (k !== a && (rival < 0 || sc[k] > sc[rival])) rival = k;
+      if (sc[a] - sc[rival] < 1) {
+        bad++;
+        for (let k = 1; k < SIT_FEATURES; k++) { W[a][k] += 0.25 * (f[k] ?? 0); W[rival][k] -= 0.25 * (f[k] ?? 0); } // the bias stays: only clues are learnt
+      }
+    }
+    if (!bad) break;
+  }
+  return W;
+}
+function sitFeatures(g: ShapeGraph, u: number, v: number, holeCue: boolean, minPx: number, PL: number[][], px: number): number[] {
+  const cu = u ? PL[g.col[u]] : [100, 0, 0], cv = PL[g.col[v]];
+  const chroma = (c: number[]) => Math.hypot(c[1], c[2]);
+  const thick = (2 * g.size[v] / Math.max(1, g.per[v])) * px; // mm: about the stroke width
+  return [
+    1,
+    g.size[v] < minPx ? 1 : 0,
+    holeCue ? 1 : 0,
+    Math.max(-1, Math.min(1, (cv[0] - cu[0]) / 50)),
+    cv[0] < 25 ? 1 : 0,
+    thick < 1.2 ? 1 : 0,
+    Math.max(-2, Math.min(2, Math.log2((g.size[v] + 1) / (g.size[u] + 1)) / 4)),
+    Math.max(-1, Math.min(1, (chroma(cv) - chroma(cu)) / 50)),
+    g.adj[v].size > 6 ? 1 : 0,
+  ];
+}
+
+/**
+ * Layers from the picture's structure: every flat shape sits on the shape around it, whatever its
+ * colour. From the outside in, the model decides for each shape: a sheet higher, paint on the same
+ * sheet, or a hole down. Corrections force a decision for one shape and retrain the model.
+ */
+function shapeDepth(lbl: Int32Array, inside: Mask, w: number, h: number, minPx: number, raise: 'centre' | 'edge', levels: number | undefined,
+  PL: number[][], px: number, learnEx: SitExample[], fixes: { i: number; a: number }[]): { D: Int32Array; n: number; fixFeat: (number[] | null)[] } | null {
+  const N = w * h, g = shapeGraph(lbl, inside, w, h), { comp, nc, size, col, adj } = g;
+  if (nc < 2) return null;
+  const forced = new Map<number, number>();
+  for (const fx of fixes) { const c = fx.i >= 0 && fx.i < N ? comp[fx.i] : 0; if (c) forced.set(c, fx.a); }
+  const run = (W: number[][]) => {
+    const dist = new Int32Array(nc + 1).fill(1 << 30), parent = new Int32Array(nc + 1).fill(-1), hole = new Uint8Array(nc + 1);
+    dist[0] = 0;
+    const done = new Uint8Array(nc + 1);
+    const buckets: number[][] = [[0]];
+    for (let lv = 0; lv < buckets.length; lv++) {
+      const bk = buckets[lv] ?? [];
+      for (let qi = 0; qi < bk.length; qi++) {
+        const u = bk[qi];
+        if (done[u] || dist[u] > lv) continue;
+        done[u] = 1;
+        const du = dist[u];
+        const below = new Set<number>();
+        if (u) for (const q of adj[u]) if (q && done[q] && dist[q] === du - 1) below.add(col[q]);
+        for (const v of adj[u]) {
+          if (v === 0 || done[v]) continue;
+          let act: number;
+          const cue = !!u && below.has(col[v]);
+          if (forced.has(v)) act = forced.get(v)!;
+          else if (u === 0) act = 0;
+          else {
+            const f = sitFeatures(g, u, v, cue, minPx, PL, px);
+            const sc = W.map((r) => r.reduce((t, x, k) => t + x * f[k], 0));
+            act = sc[0] >= sc[1] && sc[0] >= sc[2] ? 0 : sc[1] >= sc[2] ? 1 : 2;
+          }
+          const nd = Math.max(1, act === 0 ? du + 1 : act === 1 ? du : du - 1);
+          if (nd < dist[v]) {
+            dist[v] = nd; parent[v] = u; hole[v] = cue ? 1 : 0;
+            if (nd <= lv) bk.push(v); else (buckets[nd] ??= []).push(v);
+          }
         }
       }
     }
-  }
+    return { dist, parent, hole };
+  };
+  // the corrections on this picture teach the model too: features of each corrected shape
+  let res = run(trainSit(learnEx));
+  const fixFeat = fixes.map((fx) => {
+    const c = fx.i >= 0 && fx.i < N ? comp[fx.i] : 0;
+    const u = c ? res.parent[c] : -1;
+    return c && u > 0 ? sitFeatures(g, u, c, !!res.hole[c], minPx, PL, px) : null;
+  });
+  const here = fixes.map((fx, k) => (fixFeat[k] ? { f: fixFeat[k]!, a: fx.a } : null)).filter((e): e is SitExample => !!e);
+  if (here.length) res = run(trainSit([...learnEx, ...here]));
+  const { dist } = res;
   let maxd = 1; for (let c = 1; c <= nc; c++) if (dist[c] < 1 << 29 && dist[c] > maxd) maxd = dist[c];
-  // squeeze into the sheets wanted
   const cap = Math.max(2, Math.min(levels ?? 24, 60));
-  const lv = (d: number) => (maxd > cap ? Math.max(1, Math.ceil((d * cap) / maxd)) : Math.max(1, d));
+  const sq = (d: number) => (maxd > cap ? Math.max(1, Math.ceil((d * cap) / maxd)) : Math.max(1, d));
   const top = maxd > cap ? cap : maxd;
   const D = new Int32Array(N).fill(top - 1);
   for (let i = 0; i < N; i++) {
     const c = comp[i]; if (!c) continue;
-    const d = lv(Math.min(dist[c], maxd));
+    const d = sq(Math.min(dist[c], maxd));
     D[i] = raise === 'centre' ? top - d : d - 1;
   }
-  return { D, n: top };
+  return { D, n: top, fixFeat };
 }
 
-/** Layers from a grey layer map: each flat grey is one sheet, lighter is higher. */
-function mapDepth(map: TraceImage, inside: Mask, w: number, h: number, levels?: number): { D: Int32Array; n: number } | null {
+/**
+ * Layers from a grey map of the same area (an AI layer map, or depth read from a photo): each shape
+ * takes the median grey under it, lighter is higher, and the greys are grouped into sheets.
+ * Small shapes are paint on the shape around them. A photo's depth is levelled first (a tilted
+ * camera makes one side look nearer).
+ */
+function mapDepth(lbl: Int32Array, map: TraceImage, inside: Mask, w: number, h: number, minPx: number, kind: 'flat' | 'photo', levels?: number): { D: Int32Array; n: number } | null {
   if (map.w !== w || map.h !== h) return null;
-  const N = w * h, L = new Float32Array(N), hist = new Float64Array(101);
-  let nin = 0;
-  for (let i = 0; i < N; i++) {
-    const v = lab(map.data[i * 4], map.data[i * 4 + 1], map.data[i * 4 + 2])[0];
-    L[i] = v; if (inside[i]) { hist[Math.max(0, Math.min(100, Math.round(v)))]++; nin++; }
+  const N = w * h, g = shapeGraph(lbl, inside, w, h), { comp, nc, size, adj } = g;
+  const L = new Float32Array(N);
+  for (let i = 0; i < N; i++) L[i] = lab(map.data[i * 4], map.data[i * 4 + 1], map.data[i * 4 + 2])[0];
+  if (kind === 'photo') {
+    // level the depth: remove the best-fit plane over the artwork
+    let sx = 0, sy = 0, sz = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0, m = 0;
+    for (let i = 0; i < N; i += 3) if (inside[i]) { const x = (i % w) / w - 0.5, y = Math.floor(i / w) / h - 0.5, z = L[i]; sx += x; sy += y; sz += z; sxx += x * x; syy += y * y; sxy += x * y; sxz += x * z; syz += y * z; m++; }
+    if (m > 100) {
+      const mx = sx / m, my = sy / m, mz = sz / m;
+      const a11 = sxx / m - mx * mx, a22 = syy / m - my * my, a12 = sxy / m - mx * my, b1 = sxz / m - mx * mz, b2 = syz / m - my * mz;
+      const det = a11 * a22 - a12 * a12;
+      if (Math.abs(det) > 1e-9) {
+        const gx = (b1 * a22 - b2 * a12) / det, gy = (a11 * b2 - a12 * b1) / det;
+        for (let i = 0; i < N; i++) L[i] -= gx * ((i % w) / w - 0.5 - mx) + gy * (Math.floor(i / w) / h - 0.5 - my);
+      }
+    }
   }
-  const sm = hist.map((_, k) => (hist[k - 2] ?? 0) * 0.5 + (hist[k - 1] ?? 0) + hist[k] * 1.5 + (hist[k + 1] ?? 0) + (hist[k + 2] ?? 0) * 0.5);
-  let peaks: number[] = [];
-  for (let k = 0; k <= 100; k++) if (sm[k] >= (sm[k - 1] ?? 0) && sm[k] > (sm[k + 1] ?? 0) && sm[k] >= nin * 0.004 * 4.5) peaks.push(k);
-  // merge peaks closer than 4 L units
-  peaks.sort((a, b) => sm[b] - sm[a]);
-  const keepP: number[] = [];
-  for (const p of peaks) if (keepP.every((q) => Math.abs(q - p) >= 4)) keepP.push(p);
-  peaks = keepP.slice(0, Math.max(2, levels ?? 60)).sort((a, b) => b - a); // lightest (top) first
-  if (peaks.length < 2) return null;
-  const D = new Int32Array(N), known = new Uint8Array(N);
-  for (let i = 0; i < N; i++) {
-    let b = 0, bd = Infinity; for (let k = 0; k < peaks.length; k++) { const d = Math.abs(L[i] - peaks[k]); if (d < bd) { bd = d; b = k; } }
-    D[i] = b; known[i] = bd <= 3 ? 1 : 0; // in-between greys are anti-aliased edges: take a neighbour's
+  // median grey per shape
+  const vals: number[][] = Array.from({ length: nc + 1 }, () => []);
+  for (let i = 0; i < N; i += size[comp[i]] > 4000 ? 4 : 1) if (comp[i]) vals[comp[i]].push(L[i]);
+  const med = vals.map((v) => { if (!v.length) return NaN; v.sort((a, b) => a - b); return v[v.length >> 1]; });
+  // stretch the big shapes' greys to 0..100
+  let lo = Infinity, hi = -Infinity;
+  for (let c = 1; c <= nc; c++) if (size[c] >= minPx && isFinite(med[c])) { lo = Math.min(lo, med[c]); hi = Math.max(hi, med[c]); }
+  if (!(hi > lo)) return null;
+  const val = med.map((v) => (isFinite(v) ? ((v - lo) / (hi - lo)) * 100 : NaN));
+  // group the greys: area-weighted peaks, or k groups when the sheet count is set
+  const big: number[] = []; for (let c = 1; c <= nc; c++) if (size[c] >= minPx && isFinite(val[c])) big.push(c);
+  let centres: number[];
+  const total = big.reduce((t, c) => t + size[c], 0);
+  if (levels && levels >= 2) {
+    const sorted = big.slice().sort((a, b) => val[a] - val[b]);
+    centres = []; let acc = 0, k = 0;
+    for (const c of sorted) { acc += size[c]; while (k < levels && acc >= (total * (k + 0.5)) / levels) { centres.push(val[c]); k++; } }
+    for (let it = 0; it < 30; it++) {
+      const s = new Float64Array(centres.length), wt = new Float64Array(centres.length);
+      for (const c of big) { let b = 0; for (let j = 1; j < centres.length; j++) if (Math.abs(val[c] - centres[j]) < Math.abs(val[c] - centres[b])) b = j; s[b] += val[c] * size[c]; wt[b] += size[c]; }
+      centres = centres.map((v, j) => (wt[j] ? s[j] / wt[j] : v));
+    }
+  } else {
+    const hist = new Float64Array(101);
+    for (const c of big) hist[Math.round(val[c])] += size[c];
+    const sm = Array.from(hist, (_, k) => { let t = 0; for (let d = -2; d <= 2; d++) t += (hist[k + d] ?? 0) * (3 - Math.abs(d)); return t; });
+    const pk: number[] = [];
+    for (let k = 0; k <= 100; k++) if (sm[k] >= (sm[k - 1] ?? 0) && sm[k] > (sm[k + 1] ?? 0) && sm[k] >= total * 0.02) pk.push(k);
+    pk.sort((a, b) => sm[b] - sm[a]);
+    centres = [];
+    const sep = kind === 'photo' ? 7 : 4;
+    for (const k of pk) if (centres.every((q) => Math.abs(q - k) >= sep)) centres.push(k);
+    centres = centres.slice(0, 24);
   }
-  fillUnknown(D, known, w, h);
-  return { D, n: peaks.length };
+  centres = [...new Set(centres.map((v) => Math.round(v * 10) / 10))].sort((a, b) => b - a); // lightest (top) first
+  if (centres.length < 2) return null;
+  const lvl = new Int32Array(nc + 1).fill(-1);
+  for (const c of big) { let b = 0; for (let j = 1; j < centres.length; j++) if (Math.abs(val[c] - centres[j]) < Math.abs(val[c] - centres[b])) b = j; lvl[c] = b; }
+  // small shapes: paint on the biggest shape they touch
+  for (let pass = 0; pass < 4; pass++) for (let c = 1; c <= nc; c++) {
+    if (lvl[c] >= 0) continue;
+    let best = -1; for (const q of adj[c]) if (q && lvl[q] >= 0 && (best < 0 || size[q] > size[best])) best = q;
+    if (best > 0) lvl[c] = lvl[best];
+  }
+  // drop empty levels
+  const used = [...new Set(Array.from(lvl).filter((v) => v >= 0))].sort((a, b) => a - b);
+  const remap = new Map(used.map((v, k) => [v, k]));
+  const n = used.length;
+  if (n < 2) return null;
+  const D = new Int32Array(N).fill(n - 1);
+  for (let i = 0; i < N; i++) { const c = comp[i]; if (c && lvl[c] >= 0) D[i] = remap.get(lvl[c])!; }
+  return { D, n };
 }
 
 function labToRgb([l, a, b]: number[]): [number, number, number] {
@@ -952,6 +1089,16 @@ function labToRgb([l, a, b]: number[]): [number, number, number] {
 /** Prompt for an image AI (Nano Banana Pro / Gemini) to redraw a picture as flat colours first. */
 export interface RedrawHints { inks: { hex: string; name: string; role: string }[]; background: string | null; text: string; font: string; shapes: string; kind?: string; photo?: boolean; textLines?: string[] }
 /** The prompt for an AI redraw in flat, cut-ready colours; much sharper when the AI picture check has run. */
+/** Ask the image model for a layer map: one flat grey per physical sheet, lighter = higher. */
+export const LAYER_MAP_PROMPT = (layers: number, c?: RedrawHints | null) => [
+  'Make a layer map of the attached picture for multi-layer laser cutting, where each layer is one cut sheet stacked on the next.',
+  'Keep exactly the same composition, outline, size and position of every shape, at the same framing.',
+  'Paint each physical layer one single flat grey: pure white for the top layer nearest the viewer, near-black for the back panel, and clearly different, evenly spaced greys in between' + (layers > 1 ? `, about ${layers} layers in total.` : '.'),
+  'Decide the layers by how the pieces physically sit on each other - overlaps, shadows cast on lower pieces, which shape is in front - not by colour. One layer can contain several colours, and the same colour can be on different layers. The inside of a hole shows the grey of the layer it reveals.',
+  c?.text ? 'Lettering is part of the layer it is cut from; keep every letter shape exact.' : '',
+  'Flat greys only: no shading, gradients, texture, outlines, labels or text added. The background outside the artwork is pure black.',
+].filter(Boolean).join(' ');
+
 export const REDRAW_PROMPT = (n: number, c?: RedrawHints | null) => {
   if (!c) return `Redraw the attached image as a flat colour-separation drawing for multi-layer laser cutting. Straight-on front view, same composition, every shape in the same place - do not redesign. Use exactly ${n} flat colours: no shading, gradients, texture, glow or shadows. Every edge a smooth, flowing, organic curve with crisp edges - no jagged edges, specks or noise. Do not outline colour areas with thin black lines; neighbouring colours touch directly. It will be cut from sheets by a laser, so every gap and detail must be bold: no hairline gaps, cracks or thin slivers. Plain flat background outside the artwork.`;
   const inks = c.inks.map((k) => `${k.name || 'colour'} ${k.hex}${k.role ? ` (${k.role})` : ''}`).join(', ');
