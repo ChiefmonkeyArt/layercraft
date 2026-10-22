@@ -552,6 +552,9 @@ async function onTraceFile(f: File, demo = false, keepCheck: PictureCheck | null
       const shaded = pictureInfo!.shaded;
       if (!demo) {
         S.traceColours = shaded ? 9 : Math.max(2, Math.min(12, a.colours));
+        // clean flat art (an AI flat redraw, vector art) already has smooth edges: trace it exactly;
+        // photos and shaded art need stronger smoothing to lose their ragged edges
+        S.traceSmooth = shaded ? 0.6 : 0.3;
         S.traceFollow = a.plainBg;
         if (S.traceFollow && S.border > 6) S.border = 4; // a slim rim round a shaped piece, not a plate frame
         syncAll();

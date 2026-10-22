@@ -256,7 +256,7 @@ export function createGuided(api: GuidedApi) {
         return chips('Colours', opts, () => S.traceColours, (v) => { S.traceColours = v; api.changed(true); });
       })(),
       ...(api.pictureCheck()?.text ? [chips<string>('Lettering', [['', 'As traced'], ...FONTS.map((f) => [f.id, f.label] as [string, string])], () => S.traceFont ?? '', (v) => { S.traceFont = v; api.changed(); })] : []),
-      chips('Edges', [[0.9, 'Soft', 'flowing curves'], [0.45, 'Crisp', 'more detail']], () => (S.traceSmooth >= 0.55 ? 0.9 : 0.45), (v) => { S.traceSmooth = v; api.changed(); }),
+      chips('Edges', [[0.9, 'Soft', 'flowing curves'], [0.45, 'Crisp', 'more detail'], [0.3, 'Exact', 'clean flat art']], () => (S.traceSmooth >= 0.55 ? 0.9 : S.traceSmooth >= 0.38 ? 0.45 : 0.3), (v) => { S.traceSmooth = v; api.changed(); }),
       chips('Outline', [['follow', 'Follow the picture', 'background removed'], ['rect', 'Rectangle'], ['circle', 'Circle']],
         () => (S.traceFollow ? 'follow' : S.shape === 'circle' ? 'circle' : 'rect'),
         (v) => { if (v === 'follow') { S.traceFollow = true; api.fitToArtwork(); } else { S.traceFollow = false; S.shape = v as Settings['shape']; } api.changed(); }),

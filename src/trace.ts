@@ -29,6 +29,7 @@ export interface TraceOut {
   openings: Pt[][][];       // per cut sheet (all but the back): rings of the openings, mm, centred
   pieces: number[];         // loose glue-in pieces per sheet
   outline?: Pt[];           // follow: the outer cut, mm, centred on the image area
+  framed?: boolean;         // follow: the artwork has its own frame colour, so no rim was added
   letterLines?: number;     // lines of lettering found in the picture
   letterWidths?: number[];  // how wide each of those lines is (relative)
   lettered?: boolean;       // the font lettering was placed
@@ -522,7 +523,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
   }
   // follow the picture: the background is the colour that fills the picture's edge,
   // flood-filled inwards; everything else is the artwork's silhouette
-  let outline: Pt[] | undefined;
+  let outline: Pt[] | undefined, framed = false;
   if (o.follow) {
     progress?.('Finding the outline…');
     const cnt = new Map<number, number>();
@@ -547,7 +548,16 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
       sil = close(sil, w, h, Math.max(1, 1.2 / px));
       for (let i = 0; i < N; i++) inside[i] = inside[i] && sil[i] ? 1 : 0;
       // outline: silhouette grown by the rim, traced on a padded field so it may leave the picture
-      const rim = Math.max(0, o.rimMm ?? 3) / px, pad = Math.ceil(rim) + 3;
+      // artwork that already has its own frame (one colour all round its edge, like a black outline)
+      // is cut along that frame; otherwise a solid rim is added round it
+      const ec = new Map<number, number>(); let en = 0;
+      for (let i = 0; i < N; i++) {
+        if (!sil[i]) continue; const x = i % w;
+        if ((x > 0 && !sil[i - 1]) || (x < w - 1 && !sil[i + 1]) || (i >= w && !sil[i - w]) || (i < N - w && !sil[i + w])) { ec.set(lbl[i], (ec.get(lbl[i]) ?? 0) + 1); en++; }
+      }
+      const frameShare = en ? Math.max(...ec.values()) / en : 0;
+      framed = frameShare >= 0.85;
+      const rim = (framed ? Math.min(0.3, Math.max(0, o.rimMm ?? 3)) : Math.max(0, o.rimMm ?? 3)) / px, pad = Math.ceil(rim) + 3;
       const pw = w + 2 * pad, ph = h + 2 * pad;
       const pm = new Uint8Array(pw * ph);
       for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) pm[(y + pad) * pw + x + pad] = sil[y * w + x];
@@ -669,6 +679,9 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
   let prev: Mask | null = null;
   const ribR = o.rib / 2 / px, slotR = o.slot / 2 / px, sig = Math.max(0.5, o.smooth / px);
   const holePx = 2 / (px * px);
+  // where a sheet's edge lies on the edge of a sheet above, pull it back under that sheet, so the two
+  // separately smoothed curves can never drift apart and show a sliver of the lower sheet
+  const tuck = 1.0 / px, top = new Int16Array(N).fill(-1);
   for (let k = 0; k < n - 1; k++) {
     progress?.(`Tracing sheet ${k + 1} of ${n}…`);
     let m: Mask = new Uint8Array(N);
@@ -678,7 +691,16 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
     const thin = new Uint8Array(N); let anyThin = false;
     for (let i = 0; i < N; i++) if (m[i] && !op[i]) { thin[i] = 1; anyThin = true; }
     if (anyThin) { const g = dilate(thin, w, h, ribR * 0.8); for (let i = 0; i < N; i++) if (g[i]) m[i] = 1; }
-    if (slotR >= 0.5) m = close(m, w, h, slotR);
+    if (slotR >= 0.5) {
+      // narrow openings are filled, except right beside a sheet above: there this sheet's edge is
+      // tucked under that sheet, so the opening is not really narrow (and filling would show)
+      const m0 = m;
+      m = close(m, w, h, slotR);
+      if (prev) {
+        const nearUp = dilate(prev, w, h, slotR * 2);
+        for (let i = 0; i < N; i++) if (m[i] && !m0[i] && nearUp[i] && !prev[i]) m[i] = 0;
+      }
+    }
     // fill tiny holes
     const inv = new Uint8Array(N); for (let i = 0; i < N; i++) inv[i] = m[i] ? 0 : 1;
     const hc = components(inv, w, h);
@@ -688,21 +710,42 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
     const cc = components(m, w, h);
     pieces.push(Math.max(0, cc.n - 1));
     prev = m;
+    // the cut: material already held by a sheet above may step back from this sheet's openings
+    // (one tuck per sheet between, so stacked shared edges stay nested)
+    for (let i = 0; i < N; i++) if (m[i] && top[i] < 0 && inside[i]) top[i] = k;
+    let cut: Mask = m;
+    if (k > 0 && tuck >= 0.5) {
+      const hole = new Uint8Array(N); let anyHole = false;
+      for (let i = 0; i < N; i++) if (!m[i]) { hole[i] = 1; anyHole = true; }
+      if (anyHole) {
+        const d2 = edt(hole, w, h);
+        cut = new Uint8Array(N);
+        for (let i = 0; i < N; i++) {
+          if (!m[i]) continue;
+          const t = top[i];
+          if (t >= 0 && t < k) { const r = tuck * Math.min(2, k - t); if (d2[i] < r * r) continue; }
+          cut[i] = 1;
+        }
+      }
+    }
     // smooth field; pad with material so every ring closes
     const pw = w + 2, ph = h + 2;
-    const f = new Float32Array(pw * ph).fill(1);
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) f[(y + 1) * pw + x + 1] = m[y * w + x];
-    const g = blur(f, pw, ph, sig);
-    for (let x = 0; x < pw; x++) { g[x] = 1; g[(ph - 1) * pw + x] = 1; }
-    for (let y = 0; y < ph; y++) { g[y * pw] = 1; g[y * pw + pw - 1] = 1; }
-    const rings = contours(g, pw, ph)
-      .map((r) => fairRing(smoothRing(r, 1.2), (o.fair ?? 1) / px))
-      .map((r) => rdpClosed(r, 0.03 / px))
-      .filter((r) => r.length >= 3)
-      .map((r) => r.map(([x, y]) => [(x - 1 + 0.5 - w / 2) * px, (y - 1 + 0.5 - h / 2) * px] as Pt));
+    const cutRings = (cm: Mask) => {
+      const f = new Float32Array(pw * ph).fill(1);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) f[(y + 1) * pw + x + 1] = cm[y * w + x];
+      const g = blur(f, pw, ph, sig);
+      for (let x = 0; x < pw; x++) { g[x] = 1; g[(ph - 1) * pw + x] = 1; }
+      for (let y = 0; y < ph; y++) { g[y * pw] = 1; g[y * pw + pw - 1] = 1; }
+      return contours(g, pw, ph)
+        .map((r) => fairRing(smoothRing(r, 1.2), (o.fair ?? 1) / px))
+        .map((r) => rdpClosed(r, 0.03 / px))
+        .filter((r) => r.length >= 3);
+    };
+    const pxRings = cutRings(cut);
+    const rings = pxRings.map((r) => r.map(([x, y]) => [(x - 1 + 0.5 - w / 2) * px, (y - 1 + 0.5 - h / 2) * px] as Pt));
     openings.push(rings);
   }
-  return { palette: P.map((c) => { const [r, g, b] = labToRgb(c); return hex(r, g, b); }), share, order, openings, pieces, outline, letterLines, letterWidths, lettered, ms: performance.now() - t0 };
+  return { palette: P.map((c) => { const [r, g, b] = labToRgb(c); return hex(r, g, b); }), share, order, openings, pieces, outline, framed, letterLines, letterWidths, lettered, ms: performance.now() - t0 };
 }
 
 function labToRgb([l, a, b]: number[]): [number, number, number] {
