@@ -33,13 +33,19 @@ export interface Settings {
   // trace: an uploaded image, one flat colour per sheet
   traceColours: number; traceSmooth: number; traceMinPiece: number; traceDarkFirst: boolean; traceGaps?: 'keep' | 'widen' | 'fill'; traceFont?: string; // '' = lettering as traced, else a bundled font id
   traceFollow?: boolean; // the outer cut follows the traced artwork instead of a plate
+  // sheets are not tied to colours: ask for any number of sheets, and the extra ones extend each
+  // traced shape in steps (a terraced edge) or repeat it (a thicker sheet)
+  traceLayers?: number;   // sheets wanted, back included; 0 or unset = one per colour
+  traceDepth?: 'extend' | 'repeat';
+  traceStepMm?: number;   // how far each extended copy steps in, mm
+  traceColourMode?: 'picture' | 'gradient'; // sheet colours from the picture, or one gradient over every sheet
   corners: boolean; cornerSize: number; cornerRings: number; cornerGap: number; cornerCurl: number; cornerBars: boolean;
 }
 
 export interface TraceInput { sig: string; openings: Pt[][][]; outline?: Pt[] }
 export interface EngineInput { s: Settings; sketch: Pt[][]; imported: Pt[][]; free?: FreeArt; trace?: TraceInput | null }
 
-export interface LayerOut { material: Paths; groups: G.Group[]; islands: number; cutLength: number; isBack: boolean }
+export interface LayerOut { material: Paths; groups: G.Group[]; islands: number; cutLength: number; isBack: boolean; src?: number; copy?: number } // src: the traced colour sheet it comes from; copy: 0 = the sheet itself, 1+ = extra sheets made from it
 export interface EngineResult {
   layers: LayerOut[]; outer: Paths; reg: Pt[]; thin: Paths;
   labelAt?: Pt; // where layer numbers are engraved, when the outline is not a plate
@@ -47,6 +53,21 @@ export interface EngineResult {
   details: { layer: number; motifs: string[] }[];
   backend?: string;
   partial?: boolean;
+}
+
+/**
+ * Which traced sheet each cut sheet comes from, top first (the back is not included).
+ * drawn: traced sheets above the back; total: sheets wanted above the back.
+ * Extra sheets are spread evenly over the traced ones.
+ */
+export function traceLayerPlan(drawn: number, total: number): { src: number; copy: number }[] {
+  const plan: { src: number; copy: number }[] = [];
+  const extra = Math.max(0, Math.round(total) - drawn);
+  for (let k = 0; k < drawn; k++) {
+    const r = drawn ? Math.floor((extra * (k + 1)) / drawn) - Math.floor((extra * k) / drawn) : 0;
+    for (let j = 0; j <= r; j++) plan.push({ src: k, copy: j });
+  }
+  return plan;
 }
 
 export function outerShape(s: Settings): Pt[] {
@@ -308,16 +329,29 @@ export async function computeAsync(
     // traced image: each sheet's openings come straight from the tracer
     const inner = followOutline ? G.offset(outer, -Math.max(0.5, s.minRib)) : G.offset(outer, -s.border);
     const layers: LayerOut[] = [];
-    if (trace) trace.openings.forEach((rings, k) => {
-      const mk = `trace|${k}`;
-      let t = C.memo.get(mk) as unknown as ReturnType<typeof G.openingTree> | undefined;
-      if (!t) {
-        const op = G.inter(G.unionEvenOdd(rings.map((r) => G.toPath(r))), inner);
-        t = G.openingTree(op);
-        C.memo.set(mk, t as any);
+    if (trace) {
+      const ops: Paths[] = trace.openings.map((rings, k) => {
+        const mk = `traceop|${k}`;
+        let op = C.memo.get(mk) as unknown as Paths | undefined;
+        if (!op) { op = G.inter(G.unionEvenOdd(rings.map((r) => G.toPath(r))), inner); C.memo.set(mk, op as any); }
+        return op;
+      });
+      const want = s.traceLayers && s.traceLayers > 1 ? s.traceLayers - 1 : 0;
+      const plan = traceLayerPlan(ops.length, want), step = Math.max(0.2, s.traceStepMm ?? 1.5), rep = s.traceDepth === 'repeat';
+      for (const { src: k, copy: j } of plan) {
+        const mk = `trace|${k}|${j}|${rep ? 'r' : step}`;
+        let t = C.memo.get(mk) as unknown as ReturnType<typeof G.openingTree> | undefined;
+        if (!t) {
+          // an extended copy: the opening steps in by one step per copy, but never covers what the
+          // next traced sheet shows through it
+          const op = j === 0 || rep ? ops[k] : G.inter(G.union(G.offset(ops[k], -step * j), ops[k + 1] ?? []), ops[k]);
+          t = G.openingTree(op);
+          C.memo.set(mk, t as any);
+        }
+        const L = mkLayer(t.groups, t.islands, t.tops); L.src = k; L.copy = j;
+        layers.push(L);
       }
-      layers.push(mkLayer(t.groups, t.islands, t.tops));
-    });
+    }
     else warnings.push('Upload an image to trace: each flat colour becomes one sheet.');
     layers.push({ material: [outerP, ...regPaths], groups: [{ outer: outerP, holes: regPaths }], islands: 0, cutLength: fixedCut, isBack: true });
     let thin: Paths = [];

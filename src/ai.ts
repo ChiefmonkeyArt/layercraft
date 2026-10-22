@@ -200,7 +200,28 @@ export async function shrinkForUpload(src: string, long = 1024): Promise<string>
   return c.toDataURL('image/jpeg', 0.9);
 }
 
-export const IDEA_PROMPT = (idea: string, n: number) => `Create artwork for a multi-layer laser-cut wooden piece: ${idea.trim()}. Straight-on front view, one bold centred subject that fills the frame, on a plain flat white background. Use exactly ${n} flat colours: no shading, gradients, texture, glow or shadows. Every edge a smooth, flowing, organic curve with crisp edges - no jagged edges, specks, thin hairlines or noise. Neighbouring colours touch directly; shapes large enough to cut from 3 mm plywood. No text unless asked for.`;
+export interface IdeaOpts { levels: number; layers: number; colours?: string } // colours: '' = a gradient that suits the design
+/** The prompt for "Describe an idea": the user's own description, built up as stacked cut sheets. */
+export const IDEA_PROMPT = (idea: string, o: IdeaOpts) => {
+  const d = idea.trim().replace(/\s+/g, ' ').replace(/[.\s]*$/, '');
+  const quoted = /["“”'‘’«»「」]/.test(d);
+  const n = Math.max(2, Math.round(o.levels));
+  const own = (o.colours ?? '').trim();
+  return [
+    'Create artwork for a layered laser-cut wooden piece: flat shapes cut from stacked sheets of wood.',
+    `The design: ${d}.`,
+    'Straight-on front view. One bold design, centred and filling the frame, on a plain flat white background.',
+    `Build it as exactly ${n} depth levels, from the back sheet to the top sheet. Each level is one flat colour and is cut as its own sheet. The back level is one solid shape that frames the whole design with an even margin. Each level above it is a clear, solid shape that sits on the level behind; larger shapes further back, finer details on top.`,
+    own
+      ? `Colours: ${own}. Use exactly ${n} flat colours in total, one per level${n > 3 ? '; where there are more levels than colours named, use clearly distinct in-between shades' : ''}.`
+      : `Colours: a smooth gradient of ${n} clearly distinct flat tones, darkest at the back and lightest on top, in hues that suit the design.`,
+    'No shading, gradients within a shape, texture, glow, shadows, reflections or 3D effects: every level is one flat colour.',
+    'Every edge is a crisp, smooth curve or clean straight line, with no specks, noise or jagged edges. Neighbouring colours touch directly; do not outline colour areas with thin lines.',
+    'The smallest detail, gap or line is at least 1/150 of the picture width, so a laser can cut it.',
+    quoted ? 'Lettering in quotes is spelled exactly as written, in a bold style; letters either overlap solidly or have clear gaps between them.' : 'No text or lettering unless the design asks for it.',
+    'No extra elements, watermark or signature.',
+  ].join(' ');
+};
 
 // ---------------- picture check (a cheap vision model reads the picture) ----------------
 /** Vision models to try, cheapest good one first. */

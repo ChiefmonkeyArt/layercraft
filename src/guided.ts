@@ -24,7 +24,7 @@ export interface GuidedApi {
   applyCheck: (c: PictureCheck) => void;
   pickPicture: () => void;
   loadDemo: () => Promise<void>;
-  traced: () => { sheets: number; pieces: number } | null;
+  traced: () => { sheets: number; pieces: number; colours: number } | null;
   traceStatus: HTMLElement;
   traceList: HTMLElement;
   drawTraceList: () => void;
@@ -35,6 +35,7 @@ export interface GuidedApi {
   fitToArtwork: () => void;
   showView: (v: View) => void;
   changed: (resetOrder?: boolean) => void; // settings changed: re-trace / recompute
+  relayer: () => void; // the sheet count or depth style changed: recolour the sheets and recompute
   exportNow: () => void;
   exportAllLayers: () => void;
   projects: {
@@ -132,28 +133,69 @@ export function createGuided(api: GuidedApi) {
       h('div', { class: 'gbtns' }, h('button', { class: 'btn small', onclick: () => { api.applyCheck(c); api.toast('AI settings applied again'); } }, 'Apply again'),
         aiButton('Check again', run, api.ai.visionCost, 'small ghost')));
   }
+  /** A number you type or step, with no upper limit. */
+  function stepper(label: string, get: () => number, set: (v: number) => void, note: () => string, min = 2) {
+    const inp = h('input', { type: 'number', min: String(min), step: '1', inputmode: 'numeric', class: 'gnum', 'aria-label': label, value: String(get()) }) as HTMLInputElement;
+    const hint = h('small', { class: 'note' }, note());
+    const put = (v: number) => { const n = Math.max(min, Math.round(v) || min); inp.value = String(n); set(n); hint.textContent = note(); };
+    inp.addEventListener('change', () => put(Number(inp.value)));
+    return h('div', { class: 'gfield' }, h('div', { class: 'glab' }, label),
+      h('div', { class: 'gstepper' },
+        h('button', { class: 'btn small', 'aria-label': `Fewer ${label.toLowerCase()}`, onclick: () => put(get() - 1) }, '−'), inp,
+        h('button', { class: 'btn small', 'aria-label': `More ${label.toLowerCase()}`, onclick: () => put(get() + 1) }, '+')),
+      hint);
+  }
+  const depthNote = (n: number) => `${n} sheets, about ${Math.round(n * S.thickness * 10) / 10} mm deep in ${S.thickness} mm ${S.material === 'paper' ? 'card' : 'ply'}.`;
+  /** How extra sheets are made when there are more sheets than traced colours. */
+  const depthChips = (onChange: () => void) => h('div', {},
+    chips<'extend' | 'repeat'>('Extra sheets', [['extend', 'Extend', 'each shape steps in'], ['repeat', 'Repeat', 'thicker shapes']],
+      () => S.traceDepth ?? 'extend', (v) => { S.traceDepth = v; onChange(); }),
+    chips('Step', [[0.8, '0.8 mm'], [1.5, '1.5 mm'], [3, '3 mm'], [5, '5 mm']], () => S.traceStepMm ?? 1.5, (v) => { S.traceStepMm = v; onChange(); }));
+  let ideaLayers = Math.max(2, Number(store.get('lc.ai.layers')) || 8);
+  let ideaColours = store.get('lc.ai.colours') ?? '';
+  let ideaMine = !!ideaColours;
+  let ideaLevels = Number(store.get('lc.ai.levels')) || 0; // 0 = auto
+  const autoLevels = () => Math.min(ideaLayers, 8);
   function ideaForm() {
-    const ta = h('textarea', { class: 'aiinp', rows: 3, placeholder: 'A koi fish curling round a lotus, in teal, coral and gold', 'aria-label': 'Describe your idea', maxlength: 600 }) as HTMLTextAreaElement;
+    const ta = h('textarea', { class: 'aiinp', rows: 4, placeholder: 'Describe the design and the art you want, e.g. a koi fish curling round a lotus, art nouveau curves, with the words “Go with the flow”', 'aria-label': 'Describe your design', maxlength: 1200 }) as HTMLTextAreaElement;
     ta.value = ideaText;
     ta.addEventListener('input', () => { ideaText = ta.value; store.set('lc.ai.idea', ta.value); });
+    const own = h('input', { type: 'text', class: 'aiinp', placeholder: 'e.g. teal, coral and gold', 'aria-label': 'Your colours', value: ideaColours, hidden: !ideaMine }) as HTMLInputElement;
+    own.addEventListener('input', () => { ideaColours = own.value; store.set('lc.ai.colours', own.value); });
+    const levelsNote = () => ideaLevels
+      ? `The AI draws ${ideaLevels} shapes; ${ideaLayers > ideaLevels ? `the other ${ideaLayers - ideaLevels} sheets extend or repeat them.` : 'one per sheet.'}`
+      : ideaLayers > 8 ? `The AI draws 8 shapes; the other ${ideaLayers - 8} sheets extend or repeat them.` : 'One drawn shape per sheet.';
+    const lvNote = h('p', { class: 'note' }, levelsNote());
     return h('div', { class: 'gfield gidea' },
-      ta,
-      chips('Colours', [[5, '5'], [6, '6'], [7, '7'], [9, '9']], () => ([5, 6, 7, 9].includes(S.traceColours) ? S.traceColours : 6), (v) => { S.traceColours = v; }),
+      h('div', { class: 'glab' }, 'Your design'), ta,
+      stepper('Layers', () => ideaLayers, (v) => { ideaLayers = v; store.set('lc.ai.layers', String(v)); lvNote.textContent = levelsNote(); }, () => depthNote(ideaLayers)),
+      chips<boolean>('Colours', [[false, 'Gradient', 'suits the design'], [true, 'My colours']], () => ideaMine, (v) => { ideaMine = v; own.hidden = !v; if (v) own.focus(); }),
+      own,
+      h('details', { class: 'gmore' }, h('summary', {}, 'More options'),
+        chips<number>('Shapes the AI draws', [[0, 'Auto'], [3, '3'], [5, '5'], [8, '8'], [12, '12']], () => ideaLevels, (v) => { ideaLevels = v; store.set('lc.ai.levels', String(v)); lvNote.textContent = levelsNote(); }),
+        lvNote,
+        depthChips(() => {}),
+        h('p', { class: 'note' }, 'Laser artists often stack more sheets than colours: Extend steps each shape in for a terraced edge, Repeat stacks copies for depth. Change it any time on the Layers step.')),
       aiButton('Create picture', async () => {
         const idea = ideaText.trim();
-        if (idea.length < 3) { api.toast('Describe your idea first'); ta.focus(); return; }
-        const url = await api.ai.create(IDEA_PROMPT(idea, S.traceColours), undefined, '3:4', () => busy('Drawing your idea…'));
+        if (idea.length < 3) { api.toast('Describe your design first'); ta.focus(); return; }
+        const levels = Math.max(2, Math.min(ideaLayers, ideaLevels || autoLevels()));
+        const mine = ideaMine ? ideaColours.trim() : '';
+        const url = await api.ai.create(IDEA_PROMPT(idea, { levels, layers: ideaLayers, colours: mine }), undefined, '3:4', () => busy('Drawing your design…'));
         if (url) {
           api.projects.startNew();
           const name = idea.split(/\s+/).slice(0, 4).join(' ').replace(/[^\p{L}\p{N} '-]/gu, '').slice(0, 40) || 'AI idea';
+          S.traceColours = levels; S.traceLayers = ideaLayers; S.traceColourMode = mine ? 'picture' : 'gradient'; S.traceDarkFirst = false;
           await api.usePicture(url, `${name}.png`);
+          S.traceColours = levels; S.traceLayers = ideaLayers; S.traceColourMode = mine ? 'picture' : 'gradient'; S.traceDarkFirst = false;
           api.setName(name.charAt(0).toUpperCase() + name.slice(1));
-          if (!S.traceFollow) { S.traceFollow = true; api.fitToArtwork(); api.changed(); }
+          if (!S.traceFollow) { S.traceFollow = true; api.fitToArtwork(); }
+          api.changed(true);
           busy(''); ideaOpen = false; go(1); return;
         }
         busy('');
       }),
-      h('p', { class: 'note' }, `Made with ${api.ai.modelLabel()} in flat colours, ready to trace.`));
+      h('p', { class: 'note' }, `Made with ${api.ai.modelLabel()} from your description, in flat colours ready to trace.`));
   }
   const ago = (t: number) => {
     const m = Math.round((Date.now() - t) / 60000);
@@ -268,6 +310,14 @@ export function createGuided(api: GuidedApi) {
         h('h2', {}, 'Layers'),
         lead('The top sheet is first. Move a colour up or down to change its depth. Drag the 3D view to look around.'),
         chips('Material', [['birch', 'Birch ply', '3 mm'], ['paper', 'Card', '0.4 mm']], () => (S.material === 'paper' ? 'paper' : 'birch'), (v) => { api.setMaterial(v); api.changed(); }),
+        (() => {
+          const colours = () => api.traced()?.colours ?? S.traceColours;
+          const get = () => (S.traceLayers && S.traceLayers > 1 ? S.traceLayers : colours());
+          const extra = h('div', { hidden: get() <= colours() }, depthChips(() => api.relayer()));
+          const f = stepper('Sheets', get, (v) => { S.traceLayers = v; extra.hidden = v <= colours(); api.relayer(); },
+            () => `${depthNote(get())} ${get() > colours() ? `${colours()} traced colours; the other sheets extend or repeat them.` : get() < colours() ? 'Fewer sheets than colours: similar colours are merged.' : 'One sheet per colour.'}`);
+          return h('div', {}, f, extra);
+        })(),
         h('div', { class: 'gfield' }, h('div', { class: 'glab' }, 'Order, top to bottom'), api.traceList,
           h('button', { class: 'btn small ghost', onclick: () => api.autoOrder() }, 'Auto order (fewest loose pieces)')),
       ];

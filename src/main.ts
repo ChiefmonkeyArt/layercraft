@@ -40,7 +40,7 @@ const S: Settings = {
   detailMode: 'symmetric', detailStart: 2, detailEvery: 2, detailSpacing: 5, detailVariety: 0.75,
   motifs: MOTIFS.map((m) => m.id),
   repeat: 'centre', freeMirror: 'lr', flowEchoes: 4, flowSpacing: 4, scrollSize: 14, scrollGap: 22,
-  traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false, traceFont: '', traceGaps: 'keep',
+  traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false, traceFont: '', traceGaps: 'keep', traceLayers: 0, traceDepth: 'extend', traceStepMm: 1.5, traceColourMode: 'picture',
   corners: false, cornerSize: 0.9, cornerRings: 3, cornerGap: 4.5, cornerCurl: 30, cornerBars: true,
 };
 // Free mode drawing: raw strokes per tool (mirroring is applied when the design is built)
@@ -479,7 +479,7 @@ function traceArea() {
 }
 function traceOpts(): TraceOpts {
   const [wm, hm] = traceArea();
-  return { colours: S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening, gaps: S.traceGaps ?? 'keep',
+  return { colours: S.traceLayers && S.traceLayers > 1 ? Math.min(S.traceColours, S.traceLayers) : S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening, gaps: S.traceGaps ?? 'keep',
     widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded || pictureCheck?.photo ? 16 : 11, fair: S.traceSmooth * ((S.traceGaps ?? 'keep') === 'keep' ? 0.7 : 2), darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined, lettering: letteringOpts() };
 }
 /** Font lettering: the AI check found text and a font is chosen. */
@@ -686,7 +686,7 @@ async function runTrace() {
       if (ord && ord.join() !== out.order.join()) traceOrder = ord; // the next schedule re-traces in this order
     }
     applyTraceColours();
-    setTraceMsg(`Traced ${out.order.length} colours into ${out.order.length} sheets in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
+    setTraceMsg(`Traced ${out.order.length} colours into ${traceSheetCount()} sheets in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
     drawTraceList();
     schedule(0);
     guided?.traced();
@@ -718,11 +718,22 @@ function traceFresh(): boolean {
   if (key !== traceRunKey || !traceBusy) { clearTimeout(traceTimer); traceTimer = window.setTimeout(runTrace, 250); traceRunKey = key; }
   return false;
 }
+/** Sheets wanted above the back; 0 = one per traced colour. */
+const traceSheetsWanted = () => (S.traceLayers && S.traceLayers > 1 ? S.traceLayers - 1 : 0);
+const traceSheetCount = () => (traceRes ? traceLayerPlan(traceRes.order.length - 1, traceSheetsWanted()).length + 1 : 0);
 function applyTraceColours() {
   if (!traceRes) return;
   colourway = 'custom';
   CUSTOM.sheet = {};
-  traceRes.order.forEach((c, d) => { CUSTOM.sheet[d + 1] = traceRes!.palette[c]; });
+  const o = traceRes.order, pal = traceRes.palette;
+  if (S.traceColourMode === 'gradient') {
+    // one smooth gradient over every sheet, from the picture's top colour to its back colour
+    CUSTOM.top = pal[o[0]]; CUSTOM.bottom = pal[o[o.length - 1]];
+  } else {
+    const plan = traceLayerPlan(o.length - 1, traceSheetsWanted());
+    plan.forEach(({ src }, i) => { CUSTOM.sheet[i + 1] = pal[o[src]]; });
+    CUSTOM.sheet[plan.length + 1] = pal[o[o.length - 1]];
+  }
   colourChanged();
 }
 function moveTrace(d: number, by: number) {
@@ -804,7 +815,7 @@ function motifChips() {
 function syncAll() { ctls.forEach((c) => c.sync()); }
 
 // ---------------- worker ----------------
-import { Stale, computeAsync, pendingThinInput } from './engine';
+import { Stale, computeAsync, pendingThinInput, traceLayerPlan } from './engine';
 import { Pool } from './pool';
 import workerUrl from './worker.ts?worker&url';
 
@@ -1360,7 +1371,8 @@ guided = createGuided({
   applyCheck,
   pickPicture: () => gFile.click(),
   loadDemo,
-  traced: () => (traceRes && result ? { sheets: result.layers.length, pieces: result.layers.reduce((a, l) => a + l.islands, 0) } : null),
+  traced: () => (traceRes && result ? { sheets: result.layers.length, pieces: result.layers.reduce((a, l) => a + l.islands, 0), colours: traceRes.order.length } : null),
+  relayer: () => { applyTraceColours(); syncAll(); schedule(); },
   traceStatus, traceList, drawTraceList,
   autoOrder: () => { traceOrder = null; schedule(0); },
   colourPanel,
