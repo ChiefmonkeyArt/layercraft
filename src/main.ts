@@ -480,7 +480,7 @@ function traceArea() {
 function traceOpts(): TraceOpts {
   const [wm, hm] = traceArea();
   return { colours: S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening, gaps: S.traceGaps ?? 'keep',
-    widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded || pictureCheck?.photo ? 16 : 11, fair: S.traceSmooth * 2, darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined, lettering: letteringOpts() };
+    widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded || pictureCheck?.photo ? 16 : 11, fair: S.traceSmooth * ((S.traceGaps ?? 'keep') === 'keep' ? 0.7 : 2), darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined, lettering: letteringOpts() };
 }
 /** Font lettering: the AI check found text and a font is chosen. */
 let letterLineCount = 0; // lines of lettering the last trace found

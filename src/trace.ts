@@ -529,7 +529,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
   fillUnknown(lbl, known, w, h);
   // round the colour boundaries: blurred one-hot, then the strongest colour wins
   {
-    const sig = Math.max(0.6, 0.45 / px);
+    const sig = keep ? 0.6 : Math.max(0.6, 0.45 / px); // keep: only pixel noise, so sharp notches stay sharp
     const bestV = new Float32Array(N).fill(-1), bestL = new Int32Array(N);
     for (let c = 0; c < Kp; c++) {
       const f = new Float32Array(N); for (let i = 0; i < N; i++) f[i] = lbl[i] === c ? 1 : 0;
@@ -570,6 +570,16 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
     if (cs.n > 0 && cs.size[big] > N * 0.02) {
       sil = close(sil, w, h, Math.max(1, 1.2 / px));
       for (let i = 0; i < N; i++) inside[i] = inside[i] && sil[i] ? 1 : 0;
+      // background the closing took in (a sharp inside corner of a frame) takes the artwork's colour
+      // beside it, so it is not cut out as a speck of background
+      {
+        let took = false; for (let i = 0; i < N; i++) if (sil[i] && bgm[i]) { took = true; break; }
+        if (took) {
+          const fl = lbl.slice(), kn = new Uint8Array(N); for (let i = 0; i < N; i++) kn[i] = bgm[i] ? 0 : 1;
+          fillUnknown(fl, kn, w, h);
+          for (let i = 0; i < N; i++) if (sil[i] && bgm[i]) lbl[i] = fl[i];
+        }
+      }
       // outline: silhouette grown by the rim, traced on a padded field so it may leave the picture
       // artwork that already has its own frame (one colour all round its edge, like a black outline)
       // is cut along that frame; otherwise a solid rim is added round it
@@ -586,10 +596,10 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
       for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) pm[(y + pad) * pw + x + pad] = sil[y * w + x];
       const grown = rim > 0.5 ? dilate(pm, pw, ph, rim) : pm;
       const fld = new Float32Array(pw * ph); for (let i = 0; i < fld.length; i++) fld[i] = grown[i] ? 0 : 1;
-      const g = blur(fld, pw, ph, Math.max(0.8, 0.8 / px));
+      const g = blur(fld, pw, ph, Math.max(0.8, (keep ? 0.25 : 0.8) / px));
       for (let x = 0; x < pw; x++) { g[x] = 1; g[(ph - 1) * pw + x] = 1; }
       for (let y = 0; y < ph; y++) { g[y * pw] = 1; g[y * pw + pw - 1] = 1; }
-      const rings = contours(g, pw, ph).map((r) => rdpClosed(fairRing(smoothRing(r, 1.2), (o.fair ?? 1) * 1.5 / px), 0.03 / px)).filter((r) => r.length >= 3);
+      const rings = contours(g, pw, ph).map((r) => rdpClosed(fairRing(smoothRing(r, 1.2), (o.fair ?? 1) * (keep ? 1 : 1.5) / px), 0.03 / px)).filter((r) => r.length >= 3);
       const area = (r: Pt[]) => { let a = 0; for (let i = 0; i < r.length; i++) { const [x1, y1] = r[i], [x2, y2] = r[(i + 1) % r.length]; a += x1 * y2 - x2 * y1; } return Math.abs(a / 2); };
       const best = rings.sort((a, b) => area(b) - area(a))[0];
       if (best) outline = best.map(([x, y]) => [(x - pad + 0.5 - w / 2) * px, (y - pad + 0.5 - h / 2) * px] as Pt);
@@ -703,7 +713,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
   const ribR = o.rib / 2 / px, slotR = o.slot / 2 / px;
   // keep: a light blur, so a gap a pixel or two wide survives; the curve fairing does the smoothing
   const sig = keep ? Math.max(0.5, Math.min(o.smooth, 0.08) / px) : Math.max(0.5, o.smooth / px);
-  const holePx = (keep ? 0.3 : 2) / (px * px);
+  const holePx = (keep ? 0.5 : 2) / (px * px);
   // where a sheet's edge lies on the edge of a sheet above, pull it back under that sheet, so the two
   // separately smoothed curves can never drift apart and show a sliver of the lower sheet
   const tuck = 1.0 / px, top = new Int16Array(N).fill(-1);
