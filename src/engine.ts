@@ -31,7 +31,7 @@ export interface Settings {
   freeMirror: MirrorMode; flowEchoes: number; flowSpacing: number; scrollSize: number; scrollGap: number;
   // frame corners: scrollwork in the corners of a rectangular panel
   // trace: an uploaded image, one flat colour per sheet
-  traceColours: number; traceSmooth: number; traceMinPiece: number; traceDarkFirst: boolean; traceFont?: string; // '' = lettering as traced, else a bundled font id
+  traceColours: number; traceSmooth: number; traceMinPiece: number; traceDarkFirst: boolean; traceGaps?: 'keep' | 'widen' | 'fill'; traceFont?: string; // '' = lettering as traced, else a bundled font id
   traceFollow?: boolean; // the outer cut follows the traced artwork instead of a plate
   corners: boolean; cornerSize: number; cornerRings: number; cornerGap: number; cornerCurl: number; cornerBars: boolean;
 }

@@ -40,7 +40,7 @@ const S: Settings = {
   detailMode: 'symmetric', detailStart: 2, detailEvery: 2, detailSpacing: 5, detailVariety: 0.75,
   motifs: MOTIFS.map((m) => m.id),
   repeat: 'centre', freeMirror: 'lr', flowEchoes: 4, flowSpacing: 4, scrollSize: 14, scrollGap: 22,
-  traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false, traceFont: '',
+  traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false, traceFont: '', traceGaps: 'keep',
   corners: false, cornerSize: 0.9, cornerRings: 3, cornerGap: 4.5, cornerCurl: 30, cornerBars: true,
 };
 // Free mode drawing: raw strokes per tool (mirroring is applied when the design is built)
@@ -479,7 +479,7 @@ function traceArea() {
 }
 function traceOpts(): TraceOpts {
   const [wm, hm] = traceArea();
-  return { colours: S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening,
+  return { colours: S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening, gaps: S.traceGaps ?? 'keep',
     widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded || pictureCheck?.photo ? 16 : 11, fair: S.traceSmooth * 2, darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined, lettering: letteringOpts() };
 }
 /** Font lettering: the AI check found text and a font is chosen. */
@@ -620,7 +620,10 @@ async function traceImage(o: TraceOpts) {
   const im = traceImgEl ?? (traceImgEl = await loadImg(traceSrc));
   if (im.naturalWidth * im.naturalHeight > MAX_IMAGE_PIXELS) throw new Error('too large');
   const long = Math.max(o.widthMm, o.heightMm);
-  const px = Math.min(0.45, Math.max(0.16, long / 1300));
+  const [, , cw0, ch0] = traceCrop ?? [0, 0, im.naturalWidth, im.naturalHeight];
+  // keep the picture's own detail: work at its native resolution (up to about 3000 px across)
+  const native = Math.max(o.widthMm / cw0, o.heightMm / ch0) / (o.follow ? 0.97 : 1);
+  const px = (o.gaps ?? 'keep') === 'keep' ? Math.max(long / 3000, Math.min(0.45, Math.max(0.08, native))) : Math.min(0.45, Math.max(0.16, long / 1300));
   const w = Math.max(32, Math.round(o.widthMm / px)), hh = Math.max(32, Math.round(o.heightMm / px));
   const c = document.createElement('canvas'); c.width = w; c.height = hh;
   const x = c.getContext('2d')!;
@@ -769,6 +772,7 @@ function traceControls(): Node[] {
       h('p', { class: 'note' }, 'Shading and texture trace badly. Open Gemini, choose Nano Banana Pro (the image model), attach your picture and paste this prompt. Then upload the result here.'),
       h('textarea', { class: 'ptext', readonly: true, rows: 6 }, REDRAW_PROMPT(S.traceColours, pictureCheck))),
     slider('Colours (sheets)', () => S.traceColours, (v) => { S.traceColours = v; traceOrder = null; tracePalette = null; }, 3, 16, 1, '', 'How many flat colours to find; each one is a sheet'),
+    select('Narrow gaps', () => S.traceGaps ?? 'keep', (v) => (S.traceGaps = v as any), [['keep', 'Keep as drawn — the laser cuts what it can'], ['widen', 'Widen to the minimum opening'], ['fill', 'Fill in']]),
     slider('Smoothness', () => S.traceSmooth, (v) => (S.traceSmooth = v), 0, 2, 0.05, 'mm', 'Fairs every edge into smooth curves (corners stay sharp); higher loses fine detail'),
     slider('Smallest loose piece', () => S.traceMinPiece, (v) => (S.traceMinPiece = v), 2, 200, 1, 'mm²', 'Loose pieces smaller than this blend into the colour around them'),
     toggle('Outline follows the picture', () => !!S.traceFollow, (v) => { S.traceFollow = v; }),

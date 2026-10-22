@@ -20,7 +20,7 @@ export interface TraceOpts {
   rimMm?: number;           // follow: solid rim around the silhouette, mm
   merge?: number;
   fair?: number;
-  gaps?: 'widen' | 'fill';  // openings narrower than the minimum: widen them (default) or fill them
+  gaps?: 'keep' | 'widen' | 'fill'; // narrow gaps and thin ribs: keep them as drawn and let the laser cut what it can (default), widen them to the minimum, or fill them
   lettering?: { hex: string; font: string; lines: string[]; shapes?: Pt[][][] }; // replace traced letters with font outlines            // curve fairing scale, mm: ripples shorter than this are smoothed into curves (0 = off)           // colours closer than this (ΔE) are one ink; larger for photos of prints
 }
 export interface TraceOut {
@@ -497,13 +497,34 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
     for (let c = 0; c < Kp; c++) { const d = 0.6 * (l - P[c][0]) ** 2 + (a - P[c][1]) ** 2 + (b - P[c][2]) ** 2; if (d < bd) { bd = d; bi = c; } }
     lbl[i] = bi; known[i] = bd < 16 * 16 ? 1 : 0;
   }
+  const keep = (o.gaps ?? 'keep') === 'keep';
   const fr = Math.max(1, 0.35 / px);
+  // keep: thin strips that are part of the drawing (a gap between two letters, a fine line) stay;
+  // they touch only one other colour. Anti-aliased fringes sit between two colours and go.
+  const lines = keep ? new Int32Array(N) : null;
   for (let c = 0; c < Kp; c++) {
     const m = new Uint8Array(N); let any = false;
     for (let i = 0; i < N; i++) if (lbl[i] === c) { m[i] = 1; any = true; }
     if (!any) continue;
     const op = open(m, w, h, fr);
-    for (let i = 0; i < N; i++) if (m[i] && !op[i]) known[i] = 0;
+    const thin = new Uint8Array(N); let anyThin = false;
+    for (let i = 0; i < N; i++) if (m[i] && !op[i]) { thin[i] = 1; anyThin = true; known[i] = 0; }
+    if (!lines || !anyThin) continue;
+    const tc = components(thin, w, h);
+    const side = new Int32Array(tc.n + 1).fill(-1), many = new Uint8Array(tc.n + 1);
+    for (let i = 0; i < N; i++) {
+      const l = tc.lab[i]; if (!l) continue;
+      const x = i % w;
+      for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]) {
+        if (j < 0 || j >= N || lbl[j] === c) continue;
+        if (side[l] < 0) side[l] = lbl[j]; else if (side[l] !== lbl[j]) many[l] = 1;
+      }
+    }
+    const minLen = 0.6 / px; // a line, not a speck
+    for (let i = 0; i < N; i++) {
+      const l = tc.lab[i];
+      if (l && !many[l] && side[l] >= 0 && tc.size[l] >= minLen) { known[i] = 1; lines[i] = c + 1; }
+    }
   }
   fillUnknown(lbl, known, w, h);
   // round the colour boundaries: blurred one-hot, then the strongest colour wins
@@ -516,6 +537,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
       for (let i = 0; i < N; i++) if (g[i] > bestV[i]) { bestV[i] = g[i]; bestL[i] = c; }
     }
     lbl = bestL;
+    if (lines) for (let i = 0; i < N; i++) if (lines[i]) lbl[i] = lines[i] - 1;
   }
   let letterLines: number | undefined, letterWidths: number[] | undefined, lettered = false;
   if (o.lettering) {
@@ -654,7 +676,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
     for (let j = 1; j <= cc.n; j++) {
       if (j === main) continue;
       const meanW = (2 * cc.size[j] / Math.max(1, per[j])) * px;
-      if (cc.size[j] < minPx || (k === 0 && meanW < 2.2)) drop[j] = 1;
+      if (cc.size[j] < minPx || (!keep && k === 0 && meanW < 2.2)) drop[j] = 1;
     }
     // recolour dropped pieces with the most common depth around them
     const votes = new Map<number, Map<number, number>>();
@@ -678,8 +700,10 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
   // build each cut sheet, fix thin ribs and narrow slots, then trace smooth outlines
   const openings: Pt[][][] = [], pieces: number[] = [];
   let prev: Mask | null = null;
-  const ribR = o.rib / 2 / px, slotR = o.slot / 2 / px, sig = Math.max(0.5, o.smooth / px);
-  const holePx = 2 / (px * px);
+  const ribR = o.rib / 2 / px, slotR = o.slot / 2 / px;
+  // keep: a light blur, so a gap a pixel or two wide survives; the curve fairing does the smoothing
+  const sig = keep ? Math.max(0.5, Math.min(o.smooth, 0.08) / px) : Math.max(0.5, o.smooth / px);
+  const holePx = (keep ? 0.3 : 2) / (px * px);
   // where a sheet's edge lies on the edge of a sheet above, pull it back under that sheet, so the two
   // separately smoothed curves can never drift apart and show a sliver of the lower sheet
   const tuck = 1.0 / px, top = new Int16Array(N).fill(-1);
@@ -688,11 +712,13 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
     let m: Mask = new Uint8Array(N);
     for (let i = 0; i < N; i++) m[i] = !inside[i] || D[i] <= k || (prev && prev[i]) ? 1 : 0;
     // thin ribs: anything that would not survive an opening at the rib width gets widened
-    const op = open(m, w, h, ribR);
-    const thin = new Uint8Array(N); let anyThin = false;
-    for (let i = 0; i < N; i++) if (m[i] && !op[i]) { thin[i] = 1; anyThin = true; }
-    if (anyThin) { const g = dilate(thin, w, h, ribR * 0.8); for (let i = 0; i < N; i++) if (g[i]) m[i] = 1; }
-    if (slotR >= 0.5) {
+    if (!keep) {
+      const op = open(m, w, h, ribR);
+      const thin = new Uint8Array(N); let anyThin = false;
+      for (let i = 0; i < N; i++) if (m[i] && !op[i]) { thin[i] = 1; anyThin = true; }
+      if (anyThin) { const g = dilate(thin, w, h, ribR * 0.8); for (let i = 0; i < N; i++) if (g[i]) m[i] = 1; }
+    }
+    if (slotR >= 0.5 && !keep) {
       // narrow openings are filled, except right beside a sheet above: there this sheet's edge is
       // tucked under that sheet, so the opening is not really narrow (and filling would show)
       const m0 = m;
