@@ -127,7 +127,7 @@ function ensureCache(r: EngineResult) {
   stackCache.thin = r.thin.length ? pathsToPath2D(r.thin) : null;
 }
 
-export function drawStack(cv: HTMLCanvasElement, r: EngineResult, s: Settings, pal: string, opts: { light: number; showThin: boolean; isPaper: boolean }) {
+export function drawStack(cv: HTMLCanvasElement, r: EngineResult, s: Settings, pal: string, opts: { light: number; showThin: boolean; isPaper: boolean; flat?: boolean }) {
   ensureCache(r);
   const ctx = cv.getContext('2d')!;
   const v = fitView(cv, s);
@@ -143,7 +143,7 @@ export function drawStack(cv: HTMLCanvasElement, r: EngineResult, s: Settings, p
     const path = stackCache.paths[i];
     ctx.save();
     ctx.setTransform(v.scale, 0, 0, v.scale, v.ox, v.oy);
-    ctx.shadowColor = i === n - 1 ? 'rgba(0,0,0,0.55)' : 'rgba(10,5,0,0.55)';
+    ctx.shadowColor = opts.flat ? 'transparent' : i === n - 1 ? 'rgba(0,0,0,0.55)' : 'rgba(10,5,0,0.55)';
     ctx.shadowBlur = i === n - 1 ? 18 * dpr : sd * 1.6;
     ctx.shadowOffsetX = -Math.cos(la) * (i === n - 1 ? 6 * dpr : sd);
     ctx.shadowOffsetY = -Math.sin(la) * (i === n - 1 ? 6 * dpr : sd);
@@ -162,12 +162,14 @@ export function drawStack(cv: HTMLCanvasElement, r: EngineResult, s: Settings, p
       ctx.setTransform(v.scale, 0, 0, v.scale, v.ox, v.oy);
     }
     // lit top edge
-    ctx.lineWidth = Math.max(0.6, dpr * 0.7) / v.scale;
-    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-    ctx.stroke(path);
+    if (!opts.flat) {
+      ctx.lineWidth = Math.max(0.6, dpr * 0.7) / v.scale;
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+      ctx.stroke(path);
+    }
     ctx.restore();
   }
-  if (opts.showThin && stackCache.thin) {
+  if (opts.showThin && !opts.flat && stackCache.thin) {
     ctx.save();
     ctx.setTransform(v.scale, 0, 0, v.scale, v.ox, v.oy);
     ctx.fillStyle = 'rgba(255,40,40,0.9)';

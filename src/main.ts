@@ -983,7 +983,7 @@ function renderInner() {
   } else stack3d?.stop();
   if (view === '3d' && simple3d && result) drawTilted(cv, result, S, colourKey(), tiltView);
   if (result) {
-    if (view === 'stack') drawStack(cv, result, S, colourKey(), { light: S.lightAngle, showThin: true, isPaper: S.material === 'paper' });
+    if (view === 'stack') drawStack(cv, result, S, colourKey(), { light: S.lightAngle, showThin: true, isPaper: S.material === 'paper', flat: flatView });
     if (view === 'layers') drawLayer(cv, result, S, layerIdx, { cut: css('--cut'), fill: css('--sheet'), ghost: css('--ghost'), island: css('--island'), bg: css('--bg') });
   }
   if (view === 'sketch' && S.repeat === 'free') drawFree(cv, result, S, softArt(), liveStroke ? [liveStroke] : [], tool, { fill: css('--sheet'), ...FREE_COL, guide: css('--ghost') });
@@ -1013,10 +1013,13 @@ function renderStatus() {
   w.innerHTML = result.warnings.map((x) => `<div>${x}</div>`).join('');
 }
 
+let flatView = false; // stack view without shadows, to compare with the picture
 function renderToolbar() {
   toolbar.innerHTML = '';
   if (view === 'stack') {
-    toolbar.append(h('button', { class: 'btn small', onclick: openColours }, 'Colours'), h('span', { class: 'hint' }, 'Top-down render of the finished stack. Red marks material thinner than the minimum rib. Pinch or scroll to zoom, double-tap to reset.'));
+    toolbar.append(h('button', { class: 'btn small', onclick: openColours }, 'Colours'),
+      h('button', { class: 'btn small' + (flatView ? ' on' : ''), title: 'Show the design flat, without the shadows of the stacked sheets, to compare it with your picture', onclick: () => { flatView = !flatView; renderToolbar(); render(); } }, flatView ? 'Stacked' : 'Flat'),
+      h('span', { class: 'hint' }, flatView ? 'Flat design view: the sheets without shadows, to compare with your picture.' : 'Top-down render of the finished stack. Red marks material thinner than the minimum rib. Pinch or scroll to zoom, double-tap to reset.'));
   } else if (view === '3d') {
     const r = h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: tiltView.explode }) as HTMLInputElement;
     r.addEventListener('input', () => { tiltView.explode = +r.value; if (simple3d) render(); else stack3d?.setExplode(+r.value); });

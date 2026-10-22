@@ -20,6 +20,7 @@ export interface TraceOpts {
   rimMm?: number;           // follow: solid rim around the silhouette, mm
   merge?: number;
   fair?: number;
+  gaps?: 'widen' | 'fill';  // openings narrower than the minimum: widen them (default) or fill them
   lettering?: { hex: string; font: string; lines: string[]; shapes?: Pt[][][] }; // replace traced letters with font outlines            // curve fairing scale, mm: ripples shorter than this are smoothed into curves (0 = off)           // colours closer than this (ΔE) are one ink; larger for photos of prints
 }
 export interface TraceOut {
@@ -700,6 +701,18 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
         const nearUp = dilate(prev, w, h, slotR * 2);
         for (let i = 0; i < N; i++) if (m[i] && !m0[i] && nearUp[i] && !prev[i]) m[i] = 0;
       }
+      if (o.gaps !== 'fill') {
+        // gaps that are part of the design (between and inside letters) are widened to the minimum
+        // opening instead of filled; tiny fillets in corners stay filled
+        const add = new Uint8Array(N); for (let i = 0; i < N; i++) add[i] = m[i] && !m0[i] ? 1 : 0;
+        const ac = components(add, w, h), big = Math.PI * slotR * slotR;
+        const gap = new Uint8Array(N); let any = false;
+        for (let i = 0; i < N; i++) { const l = ac.lab[i]; if (l && ac.size[l] >= big) { gap[i] = 1; any = true; } }
+        if (any) {
+          const wide = dilate(gap, w, h, slotR * 0.75);
+          for (let i = 0; i < N; i++) if (wide[i] && !(prev && prev[i])) m[i] = 0;
+        }
+      }
     }
     // fill tiny holes
     const inv = new Uint8Array(N); for (let i = 0; i < N; i++) inv[i] = m[i] ? 0 : 1;
@@ -761,7 +774,7 @@ function labToRgb([l, a, b]: number[]): [number, number, number] {
 export interface RedrawHints { inks: { hex: string; name: string; role: string }[]; background: string | null; text: string; font: string; shapes: string; kind?: string; photo?: boolean; textLines?: string[] }
 /** The prompt for an AI redraw in flat, cut-ready colours; much sharper when the AI picture check has run. */
 export const REDRAW_PROMPT = (n: number, c?: RedrawHints | null) => {
-  if (!c) return `Redraw the attached image as a flat colour-separation drawing for multi-layer laser cutting. Straight-on front view, same composition, every shape in the same place - do not redesign. Use exactly ${n} flat colours: no shading, gradients, texture, glow or shadows. Every edge a smooth, flowing, organic curve with crisp edges - no jagged edges, specks or noise. Do not outline colour areas with thin black lines; neighbouring colours touch directly. Plain flat background outside the artwork.`;
+  if (!c) return `Redraw the attached image as a flat colour-separation drawing for multi-layer laser cutting. Straight-on front view, same composition, every shape in the same place - do not redesign. Use exactly ${n} flat colours: no shading, gradients, texture, glow or shadows. Every edge a smooth, flowing, organic curve with crisp edges - no jagged edges, specks or noise. Do not outline colour areas with thin black lines; neighbouring colours touch directly. It will be cut from sheets by a laser, so every gap and detail must be bold: no hairline gaps, cracks or thin slivers. Plain flat background outside the artwork.`;
   const inks = c.inks.map((k) => `${k.name || 'colour'} ${k.hex}${k.role ? ` (${k.role})` : ''}`).join(', ');
   const hasOutline = c.inks.some((k) => /outline/i.test(k.role));
   const bands = c.inks.filter((k) => !/text|letter/i.test(k.role));
@@ -769,12 +782,13 @@ export const REDRAW_PROMPT = (n: number, c?: RedrawHints | null) => {
   const said = lines && lines.length > 1 ? `, on ${lines.length} lines: ${lines.map((l) => `"${l}"`).join(' / ')}` : `: "${c.text}"`;
   return [
     `The attached image is ${c.photo ? 'a photo of a real piece' : 'a picture'}${c.kind ? ` (${c.kind})` : ''}. Redraw it as clean flat vector-style artwork for multi-layer laser cutting. Straight-on front view, same composition, outline shape and proportions, every shape in exactly the same place - do not redesign or restyle it.`,
-    c.shapes ? `The artwork is: ${c.shapes}` : '',
+    c.shapes ? `The artwork is: ${c.shapes.replace(/[.\s]*$/, "")}.` : '',
     `Use exactly these ${c.inks.length} flat colours and no others: ${inks}.`,
     bands.length >= 3 && /band|offset|concentric|layer|ring/i.test(c.shapes) ? `From the outside in, the bands are: ${bands.map((k) => k.name || k.hex).join(', ')}.` : '',
     'Remove everything that comes from the camera or the material: lighting, shading, shadows between layers, reflections, texture, grain and blur.',
     'Every edge must be a crisp, perfectly smooth curve. Rounded shapes stay perfectly rounded; bands that run alongside each other keep an even width all the way round, like clean offset paths. No jagged edges, wobbles, specks or noise.',
     c.text ? `Keep the lettering exactly as written${said}${c.font ? `, in a clean ${c.font} style` : ''}, same size, weight and position, with crisp letter shapes, exact spelling and clear gaps between letters.` : '',
+    'This will be cut from sheets by a laser: every gap, line and detail must be bold. Neighbouring letters either overlap solidly or have a clear gap between them at least half as wide as a letter stroke; no hairline gaps, hairline cracks or thin slivers anywhere.',
     hasOutline ? 'Keep the outline as one even, smooth band.' : 'Do not add thin black outlines; neighbouring colours touch directly.',
     `Plain flat ${c.background ? c.background : 'white'} background outside the artwork. No extra elements, no drop shadow, no 3D effect.`,
   ].filter(Boolean).join(' ');
