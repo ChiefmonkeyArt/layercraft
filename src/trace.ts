@@ -515,8 +515,40 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
   // a photo or a layer map: the pixels are noisy but the real object has clean curves, so edges are
   // smoothed into curves (gaps are still kept, never joined); a flat redraw is traced exactly
   const clean = !!o.clean;
+  const CLEAN_FAIR = 1.2, CLEAN_SIG = 0.15; // mm: fair out wobble (corners kept), barely blur so notches stay
   const keepE = keep && !clean;
-  const fairMm = clean ? Math.max(o.fair ?? 1, o.depth === 'map' ? 2.0 : 1.0) : (o.fair ?? 1);
+  const fairMm = clean ? Math.max(o.fair ?? 1, CLEAN_FAIR) : (o.fair ?? 1);
+  // clean mode: put each cut edge where the photo's colour is half-way between the two sides
+  // (sub-pixel, unbiased), instead of on the pixel labels, which lean towards one side
+  let PL: Float32Array | null = null;
+  const edgeToPhoto = (cm: Mask, mat: Mask, f: Float32Array, pw: number) => {
+    if (!PL) { PL = new Float32Array(N * 3); for (let i = 0; i < N; i++) { const L = lab(data[4 * i], data[4 * i + 1], data[4 * i + 2]); PL[3 * i] = L[0]; PL[3 * i + 1] = L[1]; PL[3 * i + 2] = L[2]; } }
+    const P3 = PL, B = 3, dist = new Int8Array(N).fill(-1), q: number[] = [];
+    for (let i = 0; i < N; i++) {
+      const x = i % w, y = (i / w) | 0; if (x === 0 || y === 0 || x === w - 1 || y === h - 1) continue;
+      const v = cm[i]; if (cm[i - 1] !== v || cm[i + 1] !== v || cm[i - w] !== v || cm[i + w] !== v) { dist[i] = 0; q.push(i); }
+    }
+    for (let qi = 0; qi < q.length; qi++) { const i = q[qi], d = dist[i]; if (d >= B + 1) continue; const x = i % w; for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]) if (j >= 0 && j < N && dist[j] < 0) { dist[j] = d + 1; q.push(j); } }
+    const R = 4;
+    for (const i of q) {
+      if (dist[i] > 2) continue;
+      const x = i % w, y = (i / w) | 0;
+      if (x < R || y < R || x >= w - R || y >= h - R) continue;
+      let tuck = false; for (let dy = -1; dy <= 1 && !tuck; dy++) for (let dx = -1; dx <= 1; dx++) { const j = i + dy * w + dx; if (cm[j] !== mat[j] || !inside[j]) { tuck = true; break; } }
+      if (tuck) continue;
+      let a0 = 0, a1 = 0, a2 = 0, na = 0, b0 = 0, b1 = 0, b2 = 0, nb = 0;
+      for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+        const j = i + dy * w + dx; if (dist[j] >= 0 && dist[j] <= B) continue;
+        if (cm[j]) { a0 += P3[3 * j]; a1 += P3[3 * j + 1]; a2 += P3[3 * j + 2]; na++; } else { b0 += P3[3 * j]; b1 += P3[3 * j + 1]; b2 += P3[3 * j + 2]; nb++; }
+      }
+      if (na < 3 || nb < 3) continue;
+      a0 /= na; a1 /= na; a2 /= na; b0 /= nb; b1 /= nb; b2 /= nb;
+      const e0 = a0 - b0, e1 = a1 - b1, e2 = a2 - b2, ee = e0 * e0 + e1 * e1 + e2 * e2;
+      if (ee < 144) continue; // the two sides look alike: nothing in the photo to follow
+      const t = ((P3[3 * i] - b0) * e0 + (P3[3 * i + 1] - b1) * e1 + (P3[3 * i + 2] - b2) * e2) / ee;
+      f[(y + 1) * pw + x + 1] = Math.max(0, Math.min(1, t));
+    }
+  };
   const fr = Math.max(1, 0.35 / px);
   // keep: thin strips that are part of the drawing (a gap between two letters, a fine line) stay;
   // they touch only one other colour. Anti-aliased fringes sit between two colours and go.
@@ -701,7 +733,43 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
       // its greys (image models drift towards the picture's own brightness). Order the regions by
       // how they nest, like the shapes, with the same learning.
       const fm = flatMapDepth(o.depthMap, inside, w, h, minPx0, o.levels);
-      if (fm) r = shapeDepth(fm.D, inside, w, h, minPx0, o.raise ?? 'centre', o.levels, fm.centres.map((g) => [(g / 255) * 100, 0, 0]), px, o.learn ?? [], fixes);
+      if (fm) {
+        // the map says which sheet a piece belongs to; the picture says exactly where its edge is
+        // (image models draw a little bolder). Each flat colour region of the picture takes the
+        // map level most of it has, unless it clearly spans two levels.
+        const pg = shapeGraph(lbl, inside, w, h), K = pg.nc + 1, nl = fm.centres.length;
+        const hist = new Int32Array(K * nl);
+        for (let i = 0; i < N; i++) { const c = pg.comp[i]; if (c) hist[c * nl + fm.D[i]]++; }
+        const snap = new Int32Array(K).fill(-1);
+        for (let c = 1; c < K; c++) {
+          let b = 0, b2 = -1; for (let l = 1; l < nl; l++) { const v = hist[c * nl + l]; if (v > hist[c * nl + b]) { b2 = b; b = l; } else if (b2 < 0 || v > hist[c * nl + b2]) b2 = l; }
+          const second = b2 >= 0 ? hist[c * nl + b2] : 0;
+          if (second < 0.25 * pg.size[c] || second < 4 * minPx0) snap[c] = b;
+        }
+        // shadows and edge shading: image models fold a letter's drop shadow into the letter. A thin
+        // region whose colour belongs to a touching sheet (a shadow always falls on the sheet below)
+        // moves to that sheet, so letters keep their true weight.
+        {
+          const Kc = cent.length, cd = (a: number, b: number) => Math.hypot(cent[a][0] - cent[b][0], cent[a][1] - cent[b][1], cent[a][2] - cent[b][2]), lc = new Int32Array(nl * Kc);
+          for (let c = 1; c < K; c++) if (snap[c] >= 0) lc[snap[c] * Kc + pg.col[c]] += pg.size[c];
+          const levelCol = Array.from({ length: nl }, (_, l) => { let b = 0; for (let k = 1; k < Kc; k++) if (lc[l * Kc + k] > lc[l * Kc + b]) b = k; return b; });
+          const moved = snap.slice();
+          for (let c = 1; c < K; c++) {
+            if (snap[c] < 0) continue;
+            const thickMm = (2 * pg.size[c] / Math.max(1, pg.per[c])) * px;
+            if (thickMm > 2.0) continue;
+            const own = pg.col[c];
+            if (own === levelCol[snap[c]]) continue;
+            let best = snap[c], bd = cd(own, levelCol[snap[c]]);
+            for (const nb of pg.adj[c]) { const l = nb ? snap[nb] : -1; if (l < 0 || l === snap[c]) continue; const dd = cd(own, levelCol[l]); if (dd < bd - 10) { bd = dd; best = l; } }
+            moved[c] = best;
+          }
+          snap.set(moved);
+        }
+        const Ds = new Int32Array(N);
+        for (let i = 0; i < N; i++) { const c = pg.comp[i]; Ds[i] = c && snap[c] >= 0 ? snap[c] : fm.D[i]; }
+        r = shapeDepth(Ds, inside, w, h, minPx0, o.raise ?? 'centre', o.levels, fm.centres.map((g) => [(g / 255) * 100, 0, 0]), px, o.learn ?? [], fixes);
+      }
     } else if (o.depth === 'map' && o.depthMap) r = mapDepth(lbl, o.depthMap, inside, w, h, minPx0, 'photo', o.levels);
     else r = shapeDepth(lbl, inside, w, h, minPx0, o.raise ?? 'centre', o.levels, P, px, o.learn ?? [], fixes);
     if (r?.fixFeat) fixFeat = r.fixFeat;
@@ -771,7 +839,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
   let prev: Mask | null = null;
   const ribR = o.rib / 2 / px, slotR = o.slot / 2 / px;
   // keep: a light blur, so a gap a pixel or two wide survives; the curve fairing does the smoothing
-  const sig = keepE ? Math.max(0.5, Math.min(o.smooth, 0.08) / px) : Math.max(0.5, Math.max(o.smooth, clean ? 0.4 : 0) / px);
+  const sig = keepE ? Math.max(0.5, Math.min(o.smooth, 0.08) / px) : (clean ? Math.max(0.6, CLEAN_SIG / px) : Math.max(0.5, o.smooth / px));
   const holePx = (keep ? 0.5 : 2) / (px * px);
   // where a sheet's edge lies on the edge of a sheet above, pull it back under that sheet, so the two
   // separately smoothed curves can never drift apart and show a sliver of the lower sheet
@@ -841,6 +909,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
     const cutRings = (cm: Mask) => {
       const f = new Float32Array(pw * ph).fill(1);
       for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) f[(y + 1) * pw + x + 1] = cm[y * w + x];
+      if (clean) edgeToPhoto(cm, m, f, pw);
       const g = blur(f, pw, ph, sig);
       for (let x = 0; x < pw; x++) { g[x] = 1; g[(ph - 1) * pw + x] = 1; }
       for (let y = 0; y < ph; y++) { g[y * pw] = 1; g[y * pw + pw - 1] = 1; }
