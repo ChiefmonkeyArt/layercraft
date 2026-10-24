@@ -500,7 +500,7 @@ function traceArea() {
 function traceOpts(): TraceOpts {
   const [wm, hm] = traceArea();
   const by = S.traceDepthBy === 'map' && !depthMapSrc ? 'shapes' : (S.traceDepthBy ?? 'colour');
-  return { depth: by, raise: S.traceRaise ?? 'centre', mapKind: depthMapKind, learn: by === 'shapes' ? learnFromOthers() : undefined, fixes: by === 'shapes' && traceFixes.length ? traceFixes : undefined, levels: by !== 'colour' && S.traceLayers && S.traceLayers > 1 ? S.traceLayers : undefined,
+  return { depth: by, raise: S.traceRaise ?? 'centre', mapKind: depthMapKind, clean: by === 'map' || !!(pictureInfo?.shaded || pictureCheck?.photo), learn: by === 'shapes' ? learnFromOthers() : undefined, fixes: by === 'shapes' && traceFixes.length ? traceFixes : undefined, levels: by !== 'colour' && S.traceLayers && S.traceLayers > 1 ? S.traceLayers : undefined,
     colours: by === 'colour' && S.traceLayers && S.traceLayers > 1 ? Math.min(S.traceColours, S.traceLayers) : S.traceColours, smooth: S.traceSmooth, minPiece: S.traceMinPiece, rib: S.minRib, slot: S.minOpening, gaps: S.traceGaps ?? 'keep',
     widthMm: wm, heightMm: hm, shape: S.traceFollow ? 'rect' : S.shape, follow: !!S.traceFollow, rimMm: S.border, merge: pictureInfo?.shaded || pictureCheck?.photo ? 16 : 11, fair: S.traceSmooth * ((S.traceGaps ?? 'keep') === 'keep' ? 0.7 : 2), darkFirst: S.traceDarkFirst, order: traceOrder ?? undefined, palette: tracePalette ?? undefined, lettering: letteringOpts() };
 }
