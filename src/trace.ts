@@ -518,13 +518,16 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
   const clean = !!o.clean;
   // clean mode edges: the cut sits on the photo's own colour edge (sub-pixel), barely blurred so
   // notches stay, then fitted with smooth curves that keep real corners (wobble under FIT_TOL goes)
-  const CLEAN_FAIR = 1.2, CLEAN_SIG = 0.15, FIT_TOL = 0.18, FIT_CORNER = 50; // mm, mm, mm, degrees
+  // crisp photo edges (a big lightness step, e.g. white letters on blue) are followed closely with
+  // little blur; soft shaded edges (bands of similar lightness) get more; fitted curves keep corners
+  const CLEAN_FAIR = 1.2, CLEAN_SIG = 0.15, SIG_CRISP = 0.25, CRISP_LO = 30, CRISP_HI = 42; // mm, mm, px, ΔL, ΔL
+  const FIT_TOL = 0.12, FIT_CORNER = 50, FIT_ADAPT = 0.5, SLIT_OWN = 0.62; // mm, degrees, mm, share
   const keepE = keep && !clean;
   const fairMm = clean ? Math.max(o.fair ?? 1, CLEAN_FAIR) : (o.fair ?? 1);
   // clean mode: put each cut edge where the photo's colour is half-way between the two sides
   // (sub-pixel, unbiased), instead of on the pixel labels, which lean towards one side
   let PL: Float32Array | null = null;
-  const edgeToPhoto = (cm: Mask, mat: Mask, f: Float32Array, pw: number) => {
+  const edgeToPhoto = (cm: Mask, mat: Mask, f: Float32Array, pw: number, crisp?: Float32Array) => {
     if (!PL) { PL = new Float32Array(N * 3); for (let i = 0; i < N; i++) { const L = lab(data[4 * i], data[4 * i + 1], data[4 * i + 2]); PL[3 * i] = L[0]; PL[3 * i + 1] = L[1]; PL[3 * i + 2] = L[2]; } }
     const P3 = PL, B = 3, dist = new Int8Array(N).fill(-1), q: number[] = [];
     for (let i = 0; i < N; i++) {
@@ -532,12 +535,12 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
       const v = cm[i]; if (cm[i - 1] !== v || cm[i + 1] !== v || cm[i - w] !== v || cm[i + w] !== v) { dist[i] = 0; q.push(i); }
     }
     for (let qi = 0; qi < q.length; qi++) { const i = q[qi], d = dist[i]; if (d >= B + 1) continue; const x = i % w; for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]) if (j >= 0 && j < N && dist[j] < 0) { dist[j] = d + 1; q.push(j); } }
-    const R = 4;
+    const R = B + 1;
     for (const i of q) {
-      if (dist[i] > 2) continue;
+      if (dist[i] > B - 1) continue;
       const x = i % w, y = (i / w) | 0;
       if (x < R || y < R || x >= w - R || y >= h - R) continue;
-      let tuck = false; for (let dy = -1; dy <= 1 && !tuck; dy++) for (let dx = -1; dx <= 1; dx++) { const j = i + dy * w + dx; if (cm[j] !== mat[j] || !inside[j]) { tuck = true; break; } }
+      let tuck = false; for (let dy = -1; dy <= 1 && !tuck; dy++) for (let dx = -1; dx <= 1; dx++) { const j = i + dy * w + dx; if (cm[j] !== mat[j] || !inside[j] || slitCut[j]) { tuck = true; break; } }
       if (tuck) continue;
       let a0 = 0, a1 = 0, a2 = 0, na = 0, b0 = 0, b1 = 0, b2 = 0, nb = 0;
       for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
@@ -550,6 +553,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
       if (ee < 144) continue; // the two sides look alike: nothing in the photo to follow
       const t = ((P3[3 * i] - b0) * e0 + (P3[3 * i + 1] - b1) * e1 + (P3[3 * i + 2] - b2) * e2) / ee;
       f[(y + 1) * pw + x + 1] = Math.max(0, Math.min(1, t));
+      if (crisp) crisp[(y + 1) * pw + x + 1] = Math.max(0, Math.min(1, (Math.abs(e0) - CRISP_LO) / (CRISP_HI - CRISP_LO)));
     }
   };
   const fr = Math.max(1, 0.35 / px);
@@ -653,7 +657,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
       const g = blur(fld, pw, ph, Math.max(0.8, (keepE ? 0.25 : 0.8) / px));
       for (let x = 0; x < pw; x++) { g[x] = 1; g[(ph - 1) * pw + x] = 1; }
       for (let y = 0; y < ph; y++) { g[y * pw] = 1; g[y * pw + pw - 1] = 1; }
-      const rings = contours(g, pw, ph).map((r) => rdpClosed((clean ? fitRing(r, FIT_TOL / px * 1.5, FIT_CORNER) : fairRing(smoothRing(r, 1.2), fairMm * (keepE ? 1 : 1.5) / px)), 0.03 / px)).filter((r) => r.length >= 3);
+      const rings = contours(g, pw, ph).map((r) => rdpClosed((clean ? fitRing(r, FIT_TOL / px * 1.5, FIT_CORNER, 0.35, FIT_ADAPT / px) : fairRing(smoothRing(r, 1.2), fairMm * (keepE ? 1 : 1.5) / px)), 0.03 / px)).filter((r) => r.length >= 3);
       const area = (r: Pt[]) => { let a = 0; for (let i = 0; i < r.length; i++) { const [x1, y1] = r[i], [x2, y2] = r[(i + 1) % r.length]; a += x1 * y2 - x2 * y1; } return Math.abs(a / 2); };
       const best = rings.sort((a, b) => area(b) - area(a))[0];
       if (best) outline = best.map(([x, y]) => [(x - pad + 0.5 - w / 2) * px, (y - pad + 0.5 - h / 2) * px] as Pt);
@@ -826,6 +830,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
   // clean mode: thin dark lines inside a sheet's face are slits in the real piece (the shadow
   // line where two parts of a letter meet, a cut between shapes). They are often only a pixel or
   // two wide, so the trace would run over them; find them in the photo and cut them as gaps.
+  const slitCut = new Uint8Array(N); // pixels cut open as slits (kept open, never re-filled)
   if (clean && n >= 2) {
     const lum = new Float32Array(N);
     for (let i = 0; i < N; i++) lum[i] = 0.3 * data[4 * i] + 0.59 * data[4 * i + 1] + 0.11 * data[4 * i + 2];
@@ -860,22 +865,24 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
       const sc = components(slit, w, h), minLen = Math.max(6, 1.0 / px);
       const bb = Array.from({ length: sc.n + 1 }, () => [w, h, -1, -1]);
       for (let i = 0; i < N; i++) { const l = sc.lab[i]; if (!l) continue; const x = i % w, y = (i / w) | 0, b = bb[l]; b[0] = Math.min(b[0], x); b[1] = Math.min(b[1], y); b[2] = Math.max(b[2], x); b[3] = Math.max(b[3], y); }
-      // a real slit runs through a sheet's face; a dark line hugging the sheet's edge is just the
-      // shadow along that edge (the edge itself is already traced), so leave those alone
-      const edge = new Uint8Array(N);
+      // a real slit (or the dark pointed tip of a gap) is mostly surrounded by this sheet's face; a
+      // dark line along the sheet's edge is just the shadow of that edge (face on one side, the
+      // sheet below on the other), and the edge itself is already traced, so leave those alone
+      const own = new Int32Array(sc.n + 1), all = new Int32Array(sc.n + 1);
       for (let i = 0; i < N; i++) {
-        if (!inside[i]) { edge[i] = 1; continue; }
-        const x = i % w, d = D[i];
-        if ((x > 0 && D[i - 1] !== d) || (x < w - 1 && D[i + 1] !== d) || (i >= w && D[i - w] !== d) || (i + w < N && D[i + w] !== d)) edge[i] = 1;
+        const l = sc.lab[i]; if (!l) continue;
+        const x = i % w, y = (i / w) | 0, d = D[i];
+        for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+          const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+          const j = yy * w + xx; if (slit[j]) continue;
+          all[l]++; if (inside[j] && D[j] === d) own[l]++;
+        }
       }
-      const nearEdge = dilate(edge, w, h, 2.5);
-      const tot = new Int32Array(sc.n + 1), near = new Int32Array(sc.n + 1);
-      for (let i = 0; i < N; i++) { const l = sc.lab[i]; if (!l) continue; tot[l]++; if (nearEdge[i]) near[l]++; }
       for (let i = 0; i < N; i++) {
         const l = sc.lab[i]; if (!l) continue;
         const b = bb[l]; if (Math.max(b[2] - b[0], b[3] - b[1]) + 1 < minLen) continue;
-        if (near[l] > 0.5 * tot[l]) continue;
-        D[i] = D[i] + 1; // open this sheet here: the slit shows the sheet below, in shadow
+        if (own[l] < SLIT_OWN * all[l]) continue;
+        D[i] = D[i] + 1; slitCut[i] = 1; // open this sheet here: the slit shows the sheet below, in shadow
       }
     }
   }
@@ -955,12 +962,24 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
     const cutRings = (cm: Mask) => {
       const f = new Float32Array(pw * ph).fill(1);
       for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) f[(y + 1) * pw + x + 1] = cm[y * w + x];
-      if (clean) edgeToPhoto(cm, m, f, pw);
-      const g = blur(f, pw, ph, sig);
+      let g: Float32Array;
+      if (clean) {
+        // crisp photo edges (white letters on blue) are followed closely; soft shaded edges
+        // (the bands) get more smoothing; blended pixel by pixel by how crisp the photo edge is
+        const crisp = new Float32Array(pw * ph);
+        edgeToPhoto(cm, m, f, pw, crisp);
+        const wgt = blur(crisp, pw, ph, 2.5);
+        const ws = blur(new Float32Array(crisp.map((v) => (v > 0 ? 1 : 0))), pw, ph, 2.5);
+        const g1 = blur(f, pw, ph, SIG_CRISP), g2 = blur(f, pw, ph, sig);
+        g = g2;
+        for (let j = 0; j < g.length; j++) { const a = ws[j] > 1e-3 ? wgt[j] / ws[j] : 0; g[j] = a * g1[j] + (1 - a) * g2[j]; }
+      } else g = blur(f, pw, ph, sig);
+      // a slit a pixel or two wide would be blurred shut: keep it open (the cut then runs through it)
+      if (clean) for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x; if (slitCut[i] && !cm[i]) { const j = (y + 1) * pw + x + 1; if (g[j] > 0.15) g[j] = 0.15; } }
       for (let x = 0; x < pw; x++) { g[x] = 1; g[(ph - 1) * pw + x] = 1; }
       for (let y = 0; y < ph; y++) { g[y * pw] = 1; g[y * pw + pw - 1] = 1; }
       return contours(g, pw, ph)
-        .map((r) => (clean ? fitRing(r, FIT_TOL / px, FIT_CORNER) : fairRing(smoothRing(r, 1.2), fairMm / px)))
+        .map((r) => (clean ? fitRing(r, FIT_TOL / px, FIT_CORNER, 0.35, FIT_ADAPT / px) : fairRing(smoothRing(r, 1.2), fairMm / px)))
         .map((r) => rdpClosed(r, 0.03 / px))
         .filter((r) => r.length >= 3);
     };
@@ -997,7 +1016,7 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
         const g = blur(f, pw, ph, sig);
         for (let x = 0; x < pw; x++) { g[x] = 1; g[(ph - 1) * pw + x] = 1; }
         for (let y = 0; y < ph; y++) { g[y * pw] = 1; g[y * pw + pw - 1] = 1; }
-        const rings = contours(g, pw, ph).map((r) => rdpClosed(clean ? fitRing(r, FIT_TOL / px, FIT_CORNER) : fairRing(smoothRing(r, 1.2), fairMm / px), 0.03 / px)).filter((r) => r.length >= 3)
+        const rings = contours(g, pw, ph).map((r) => rdpClosed(clean ? fitRing(r, FIT_TOL / px, FIT_CORNER, 0.35, FIT_ADAPT / px) : fairRing(smoothRing(r, 1.2), fairMm / px), 0.03 / px)).filter((r) => r.length >= 3)
           .map((r) => r.map(([x, y]) => [(x - 1 + 0.5 - w / 2) * px, (y - 1 + 0.5 - h / 2) * px] as Pt));
         if (rings.length) list.push({ hex: palHex[c], rings });
       }

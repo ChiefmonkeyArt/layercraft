@@ -88,6 +88,13 @@ function fitCubic(p: Pt[], t1: Pt, t2: Pt, tol: number, out: Bez[], depth = 0) {
   fitCubic(p.slice(split), mul(tc, -1), t2, tol, out, depth + 1);
 }
 
+function gaussLoop(p: Pt[], sigma: number): Pt[] {
+  const n = p.length, r = Math.ceil(sigma * 2.5), wts: number[] = [];
+  for (let k = -r; k <= r; k++) wts.push(Math.exp(-(k * k) / (2 * sigma * sigma)));
+  const W = wts.reduce((a, b) => a + b, 0);
+  return p.map((_, i) => { let x = 0, y = 0; for (let k = -r; k <= r; k++) { const q = p[((i + k) % n + n) % n], wk = wts[k + r]; x += q[0] * wk; y += q[1] * wk; } return [x / W, y / W] as Pt; });
+}
+
 /** evenly spaced points along a closed ring */
 function resample(p: Pt[], step: number): Pt[] {
   const out: Pt[] = [];
@@ -107,7 +114,7 @@ function resample(p: Pt[], step: number): Pt[] {
  * cornerDeg: a turn sharper than this over ~2 px on each side is a real corner and stays sharp.
  * Returns a dense polyline of the fitted curves (step px apart).
  */
-export function fitRing(ring: Pt[], tol = 0.7, cornerDeg = 50, step = 0.35): Pt[] {
+export function fitRing(ring: Pt[], tol = 0.7, cornerDeg = 50, step = 0.35, adaptive = 0): Pt[] {
   if (ring.length < 8) return ring;
   const per = ring.reduce((a, q, i) => a + len(sub(ring[(i + 1) % ring.length], q)), 0);
   if (per < 6) return ring;
@@ -122,6 +129,18 @@ export function fitRing(ring: Pt[], tol = 0.7, cornerDeg = 50, step = 0.35): Pt[
       return [(a[0] + 2 * b[0] + c[0]) / 4, (a[1] + 2 * b[1] + c[1]) / 4] as Pt;
     });
     p = q;
+  }
+  // how noisy is this edge? compare it with a well-smoothed copy of itself; a crisp edge (a letter)
+  // is followed tightly, a soft or noisy one (a shaded band) has its wobble ignored up to its noise
+  if (adaptive) {
+    const sm = gaussLoop(p, 3 / ds), dev: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const a = sm[(i - 1 + n) % n], c = sm[(i + 1) % n], t = unit(sub(c, a)), nrm: Pt = [-t[1], t[0]];
+      dev.push(Math.abs(dot(sub(p[i], sm[i]), nrm)));
+    }
+    dev.sort((x, y) => x - y);
+    const mad = dev[Math.floor(dev.length / 2)] * 1.4826;
+    tol = Math.max(tol, Math.min(adaptive, 2.2 * mad));
   }
   // corners: sharp turn between the chords 2 px back and 2 px ahead, local maximum
   const k = Math.max(2, Math.round(2 / ds));
