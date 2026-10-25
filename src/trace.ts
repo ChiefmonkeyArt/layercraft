@@ -3,6 +3,7 @@
 // colour sits at depth <= k, so looking down the stack you see the picture.
 // Pure functions on plain arrays, so this runs in a worker or on the main thread.
 import { fitRing } from './fitcurve';
+import BUILT_IN from './learned-defaults.json';
 import type { Pt } from './geom';
 
 export interface TraceImage { w: number; h: number; data: Uint8ClampedArray }
@@ -1063,16 +1064,21 @@ function shapeGraph(lbl: Int32Array, inside: Mask, w: number, h: number): ShapeG
  * are the built-in rules and the user's corrections retrain it.
  */
 export const SIT_FEATURES = 9;
-export const SIT_DEFAULT: number[][] = [
+/** the hand-written rules: the model before anything has been learnt */
+export const SIT_RULES: number[][] = [
   // bias, small, hole, lighter, dark, thin, size ratio, chroma diff, many neighbours
   [1, 0, 0, 0, 0, 0, 0, 0, 0],   // higher
   [0, 3, 0, 0, 0, 0, 0, 0, 0],   // same sheet
   [0, 0, 5, 0, 0, 0, 0, 0, 0],   // lower
 ];
+const okWeights = (w: unknown): w is number[][] => Array.isArray(w) && w.length === 3 && w.every((r) => Array.isArray(r) && r.length === SIT_FEATURES && r.every((v) => Number.isFinite(v)));
+/** what every copy of the app starts from: the rules plus lessons baked in at release (see scripts/bake-lessons.ts) */
+export const SIT_DEFAULT: number[][] = okWeights((BUILT_IN as any).weights) ? (BUILT_IN as any).weights : SIT_RULES;
+export const BUILT_IN_LESSONS: number = +(BUILT_IN as any).lessons || 0;
 export interface SitExample { f: number[]; a: number }
 /** Retrain the model from corrections: start at the rules, nudge until every correction is met. */
-export function trainSit(ex: SitExample[]): number[][] {
-  const W = SIT_DEFAULT.map((r) => r.slice());
+export function trainSit(ex: SitExample[], from: number[][] = SIT_DEFAULT): number[][] {
+  const W = from.map((r) => r.slice());
   if (!ex.length) return W;
   for (let ep = 0; ep < 120; ep++) {
     let bad = 0;

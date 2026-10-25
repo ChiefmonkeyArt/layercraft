@@ -17,7 +17,7 @@ let Stack3DClass: typeof Stack3D | null = null;
 let loading3d = false;
 import { MOTIFS } from './motifs';
 import type { TraceOpts, TraceOut } from './trace';
-import { LAYER_MAP_PROMPT, REDRAW_PROMPT, analysePicture, hexDist, trace as traceNow } from './trace';
+import { BUILT_IN_LESSONS, LAYER_MAP_PROMPT, REDRAW_PROMPT, analysePicture, hexDist, trace as traceNow } from './trace';
 import type { PictureCheck } from './ai';
 import { lineShapes, pickFont, splitLines } from './lettering';
 import { allLayersSVG, download, exportZip, layerSVG, parseSVG, planSheets, simplify } from './svgio';
@@ -478,6 +478,17 @@ const learnSave = () => store.set(LEARN_KEY, JSON.stringify(learnStore));
 const picKey = () => { let x = 0; const t = traceSrc; for (let i = 0; i < t.length; i += Math.max(1, t.length >> 12)) x = (x * 31 + t.charCodeAt(i)) | 0; return `p${t.length.toString(36)}${(x >>> 0).toString(36)}`; };
 const learnFromOthers = (): SitExample[] => { const k = picKey() + ':'; return Object.entries(learnStore.ex).filter(([key]) => !key.startsWith(k)).map(([, v]) => v).slice(-400); };
 const learnCount = () => Object.keys(learnStore.ex).length;
+/** the lessons as plain numbers for the release bake: no pictures, no picture fingerprints; fixes from
+ *  the same picture share a meaningless group number so the bake can ask "do several pictures agree?" */
+const lessonsFile = () => {
+  const groups = new Map<string, number>(); const lessons: { p: number; f: number[]; a: number }[] = [];
+  for (const [key, v] of Object.entries(learnStore.ex)) {
+    const pk = key.slice(0, key.lastIndexOf(':'));
+    if (!groups.has(pk)) groups.set(pk, groups.size);
+    lessons.push({ p: groups.get(pk)!, f: v.f.map((x) => Math.round(x * 1000) / 1000), a: v.a });
+  }
+  return { app: 'layercraft', kind: 'lessons', version: 1, features: ['bias', 'small', 'hole', 'lighter', 'dark', 'thin', 'size ratio', 'chroma diff', 'many neighbours'], actions: ['higher', 'same sheet', 'lower'], lessons };
+};
 let traceName = '';
 let traceCrop: [number, number, number, number] | null = null; // artwork bounding box in the picture (px)
 let traceRes: TraceOut | null = null;
@@ -1497,6 +1508,8 @@ guided = createGuided({
   fixCount: () => traceFixes.length,
   clearFixes: () => { traceFixes = []; fixMenu.hidden = true; schedule(0); },
   learnCount,
+  builtInLessons: () => BUILT_IN_LESSONS,
+  saveLessons: () => download(new Blob([JSON.stringify(lessonsFile(), null, 1)], { type: 'application/json' }), 'layercraft-lessons.json'),
   forgetLearning: () => { learnStore = { ex: {} }; learnSave(); schedule(0); },
   setMaterial: (v) => { S.material = v; Object.assign(S, MATERIALS[v].s); },
   fitToArtwork,

@@ -41,6 +41,8 @@ export interface GuidedApi {
   clearFixes: () => void;
   learnCount: () => number;
   forgetLearning: () => void;
+  builtInLessons: () => number;
+  saveLessons: () => void;
   setMaterial: (id: string) => void;
   fitToArtwork: () => void;
   showView: (v: View) => void;
@@ -365,7 +367,8 @@ export function createGuided(api: GuidedApi) {
           return h('div', { class: 'gfield' }, h('div', { class: 'glab' }, 'Fix a layer'),
             h('button', { class: `btn ${on ? 'primary' : ''}`, 'aria-pressed': on ? 'true' : 'false', onclick: () => { api.setFixMode(!on); draw(); } }, on ? 'Done fixing' : 'Tap a shape to fix it'),
             h('p', { class: 'note' }, on ? 'Tap any shape in the preview and say how it sits. Similar shapes follow, and the app remembers for your next pictures.' : 'Wrong sheet somewhere? Correct it, and the app learns from you.'),
-            h('p', { class: 'note' }, `${api.fixCount() ? `${api.fixCount()} fixes on this picture. ` : ''}${n ? `Learnt from ${n} fix${n === 1 ? '' : 'es'}, stored only in this browser.` : ''}`),
+            h('p', { class: 'note' }, `${api.fixCount() ? `${api.fixCount()} fixes on this picture. ` : ''}${n ? `Learnt from ${n} fix${n === 1 ? '' : 'es'}, stored only in this browser.` : ''}${api.builtInLessons() ? ` Starts from ${api.builtInLessons()} built-in lessons.` : ''}`),
+            n ? h('button', { class: 'btn small ghost', title: 'Numbers only: how each fixed shape sat and what you chose. No pictures.', onclick: () => api.saveLessons() }, 'Save my lessons') : null,
             api.fixCount() ? h('button', { class: 'btn small ghost', onclick: () => { api.clearFixes(); draw(); } }, 'Undo fixes on this picture') : null,
             n ? h('button', { class: 'btn small ghost', onclick: () => { if (confirm('Forget everything the app has learnt from your fixes?')) { api.forgetLearning(); draw(); } } }, 'Forget what it learnt') : null);
         })() : null,
