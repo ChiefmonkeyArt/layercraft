@@ -145,7 +145,7 @@ export function drawStack(cv: HTMLCanvasElement, r: EngineResult, s: Settings, p
     ctx.save();
     ctx.setTransform(v.scale, 0, 0, v.scale, v.ox, v.oy);
     ctx.shadowColor = opts.flat ? 'transparent' : i === n - 1 ? 'rgba(0,0,0,0.55)' : 'rgba(10,5,0,0.55)';
-    ctx.shadowBlur = i === n - 1 ? 18 * dpr : sd * 1.6;
+    ctx.shadowBlur = i === n - 1 ? 18 * dpr : sd * 0.7; // a sheet's own shadow is short and fairly hard
     ctx.shadowOffsetX = -Math.cos(la) * (i === n - 1 ? 6 * dpr : sd);
     ctx.shadowOffsetY = -Math.sin(la) * (i === n - 1 ? 6 * dpr : sd);
     ctx.fillStyle = P.colour(i, n, s.material);
@@ -164,11 +164,16 @@ export function drawStack(cv: HTMLCanvasElement, r: EngineResult, s: Settings, p
       ctx.globalCompositeOperation = 'source-over';
       ctx.setTransform(v.scale, 0, 0, v.scale, v.ox, v.oy);
     }
-    // lit top edge
+    // lit top edge: only the edges that face the light catch it (a line all round reads as a border)
     if (!opts.flat) {
-      ctx.lineWidth = Math.max(0.6, dpr * 0.7) / v.scale;
-      ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+      const e = Math.max(0.6, dpr * 0.8) / v.scale;
+      ctx.save();
+      ctx.clip(path, 'evenodd');
+      ctx.translate(-Math.cos(la) * e, -Math.sin(la) * e);
+      ctx.lineWidth = e * 1.6;
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
       ctx.stroke(path);
+      ctx.restore();
     }
     ctx.restore();
   }

@@ -644,8 +644,11 @@ async function traceImage(o: TraceOpts, map?: HTMLImageElement) {
   const long = Math.max(o.widthMm, o.heightMm);
   const [, , cw0, ch0] = traceCrop ?? [0, 0, im.naturalWidth, im.naturalHeight];
   // keep the picture's own detail: work at its native resolution (up to about 3000 px across)
-  const native = Math.max(o.widthMm / cw0, o.heightMm / ch0) / (o.follow ? 0.97 : 1);
-  const px = (o.gaps ?? 'keep') === 'keep' ? Math.max(long / 3000, Math.min(0.45, Math.max(0.08, native))) : Math.min(0.45, Math.max(0.16, long / 1300));
+  // (a followed outline fits the picture inside the area, so the tighter side sets the scale;
+  // a plate covers the area, so the looser side does). Never shrink the picture: fine slits are
+  // often only a pixel or two wide.
+  const native = o.follow ? Math.min(o.widthMm / cw0, o.heightMm / ch0) * 0.97 : Math.max(o.widthMm / cw0, o.heightMm / ch0);
+  const px = (o.gaps ?? 'keep') === 'keep' ? Math.max(long / 3000, Math.min(0.45, Math.max(0.06, native))) : Math.min(0.45, Math.max(0.16, long / 1300));
   const w = Math.max(32, Math.round(o.widthMm / px)), hh = Math.max(32, Math.round(o.heightMm / px));
   const c = document.createElement('canvas'); c.width = w; c.height = hh;
   const x = c.getContext('2d')!;
