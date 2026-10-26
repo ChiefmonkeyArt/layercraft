@@ -24,6 +24,8 @@ import { allLayersSVG, download, exportZip, layerSVG, parseSVG, planSheets, simp
 import { createGuided, store } from './guided';
 import { createAiUi } from './aiui';
 import type { SitExample } from './trace';
+import { BG, checkAndFix, planFromPicture, parseColourList, render as renderCut, snapToPlan } from './cutready';
+import type { CutReport } from './cutready';
 import { deleteProject, getProject, listProjects, newId, saveProject } from './projects';
 
 // ---------------- materials ----------------
@@ -619,6 +621,49 @@ function stackOrder(out: TraceOut, stack: string[]): number[] | null {
   });
   return ord;
 }
+/** A CSS colour name or code → #rrggbb, or null if the browser does not know it. */
+function cssColour(t: string): string | null {
+  const x = document.createElement('canvas').getContext('2d')!;
+  x.fillStyle = '#010203'; x.fillStyle = t.trim();
+  const v = String(x.fillStyle);
+  return v === '#010203' && !/^#?010203$/i.test(t.trim()) ? null : /^#[0-9a-f]{6}$/i.test(v) ? v : null;
+}
+/**
+ * An AI design made cut-ready: every pixel snapped to the planned colours (one per sheet, back first),
+ * specks removed, thin necks and strands made strong enough to cut, then checked for missing or
+ * merged sheets. Returns the cleaned picture and what was found. Without a plan the colours come
+ * from the picture itself (darkest at the back).
+ */
+async function cutReady(url: string, plan: string[] | null, levels: number): Promise<{ url: string; cols: string[]; plan: string[]; report: CutReport; check: PictureCheck } | null> {
+  try {
+    let im = await loadImg(url);
+    const long = Math.max(im.naturalWidth, im.naturalHeight), sc = Math.min(1, 1600 / long);
+    const c = document.createElement('canvas'); c.width = Math.round(im.naturalWidth * sc); c.height = Math.round(im.naturalHeight * sc);
+    const x = c.getContext('2d', { willReadFrequently: true })!; x.drawImage(im, 0, 0, c.width, c.height);
+    const img = { w: c.width, h: c.height, data: x.getImageData(0, 0, c.width, c.height).data };
+    const planned = !!plan?.length;
+    if (!plan?.length) {
+      const a = analysePicture(img);
+      plan = planFromPicture(a.found, levels);
+    }
+    await new Promise((r) => setTimeout(r, 30)); // let the busy message paint
+    const snap = snapToPlan(img, plan);
+    // the design's width in pixels sets the scale: it is cut at the stack's width inside the rim
+    let x0 = img.w, x1 = -1;
+    for (let i = 0; i < img.w * img.h; i++) if (snap.labels[i] >= 0) { const px = i % img.w; if (px < x0) x0 = px; if (px > x1) x1 = px; }
+    const mmPerPx = (S.width - 2 * Math.min(S.border, 6)) / Math.max(1, x1 - x0 + 1);
+    const { labels, report } = checkAndFix(snap, { mmPerPx, rib: S.minRib, optional: !planned });
+    const out = renderCut(labels, img.w, img.h, snap.cols);
+    x.putImageData(new ImageData(out.data as any, out.w, out.h), 0, 0);
+    const cols = snap.cols;
+    const check: PictureCheck = { kind: 'flat AI design', photo: false, background: BG, plainBackground: true,
+      inks: cols.map((hx, k) => ({ hex: hx, name: `sheet ${k + 1}`, role: k === 0 ? 'back' : `level ${k + 1}` })),
+      stack: cols.filter((_, k) => !report.missing.includes(k) && !report.absent.includes(k)).slice().reverse(), text: '', font: '', shapes: '' };
+    check.palette = [BG, ...cols.filter((_, k) => !report.missing.includes(k) && !report.absent.includes(k))];
+    check.inks = check.inks.filter((_, k) => !report.missing.includes(k) && !report.absent.includes(k));
+    return { url: c.toDataURL('image/png'), cols, plan, report, check };
+  } catch { return null; }
+}
 /** Use what the AI check found: how many colours, the background, the layer order. */
 function applyCheck(c: PictureCheck) {
   pictureCheck = c;
@@ -626,7 +671,7 @@ function applyCheck(c: PictureCheck) {
   S.traceColours = Math.max(2, Math.min(12, c.inks.length + (c.background && !bgReused ? 1 : 0)));
   S.traceFont = c.text ? pickFont(c.font) : ''; letterLineCount = 0; letterWidths = undefined;
   if (c.plainBackground) { S.traceFollow = true; if (S.border > 6) S.border = 4; fitToArtwork(); }
-  traceOrder = null; tracePalette = null; checkOrderPending = true;
+  traceOrder = null; tracePalette = c.palette?.length ? c.palette.slice() : null; checkOrderPending = true;
   syncAll(); schedule(0); autosave();
 }
 /** How many flat colours the picture has, and whether it has shading or a plain background. */
@@ -1477,10 +1522,13 @@ const aiUi = createAiUi(h, toast);
 $('#mode').before(aiUi.badge);
 guided = createGuided({
   S, h, toast, ai: aiUi,
-  usePicture: async (url: string, name: string, sameArt = false) => {
+  usePicture: async (url: string, name: string, sameArt: boolean | PictureCheck = false) => {
     const b = await (await fetch(url)).blob();
-    await onTraceFile(new File([b], name, { type: b.type || 'image/png' }), false, sameArt ? pictureCheck : null);
+    await onTraceFile(new File([b], name, { type: b.type || 'image/png' }), false, typeof sameArt === 'object' ? sameArt : sameArt ? pictureCheck : null);
   },
+  parseColours: (text: string) => parseColourList(text, cssColour),
+  forgetPalette: () => { if (pictureCheck) pictureCheck.palette = undefined; },
+  cutReady,
   setName: (n: string) => { projectName = n; $<HTMLInputElement>('#pname').value = n; },
   hasPicture: () => !!traceSrc && S.repeat === 'trace',
   picture: () => ({ src: traceSrc, name: traceName }),
@@ -1514,7 +1562,7 @@ guided = createGuided({
   setMaterial: (v) => { S.material = v; Object.assign(S, MATERIALS[v].s); },
   fitToArtwork,
   showView,
-  changed: (resetOrder) => { if (resetOrder) { traceOrder = null; tracePalette = null; } syncAll(); schedule(); },
+  changed: (resetOrder) => { if (resetOrder) { traceOrder = null; tracePalette = pictureCheck?.palette?.length ? pictureCheck.palette.slice() : null; if (pictureCheck?.palette?.length) checkOrderPending = true; } syncAll(); schedule(); },
   exportNow: () => $('#export').click(),
   exportAllLayers: () => void exportAllLayers(),
   projects: { list: listProjects, open: openSaved, remove: async (id: string) => { await deleteProject(id); if (id === projectId) { projectId = ''; store.set('lc.current', ''); } }, current: () => projectId, startNew },

@@ -55,16 +55,16 @@ export interface TraceOut {
 
 // ---------- colour ----------
 function srgb2lin(c: number) { c /= 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
-function lab(r: number, g: number, b: number): [number, number, number] {
+export function lab(r: number, g: number, b: number): [number, number, number] {
   const R = srgb2lin(r), G = srgb2lin(g), B = srgb2lin(b);
   const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
   const X = f((R * 0.4124 + G * 0.3576 + B * 0.1805) / 0.95047), Y = f(R * 0.2126 + G * 0.7152 + B * 0.0722), Z = f((R * 0.0193 + G * 0.1192 + B * 0.9505) / 1.08883);
   return [116 * Y - 16, 500 * (X - Y), 200 * (Y - Z)];
 }
-const hex = (r: number, g: number, b: number) => '#' + [r, g, b].map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')).join('');
+export const hex = (r: number, g: number, b: number) => '#' + [r, g, b].map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')).join('');
 /** Colour difference (ΔE76) between two #rrggbb colours. */
 export function hexDist(a: string, b: string) { const p = lab(...hexRgb(a)), q = lab(...hexRgb(b)); return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]); }
-function hexRgb(h: string): [number, number, number] { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+export function hexRgb(h: string): [number, number, number] { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
 function rand(seed: number) { let s = seed >>> 0; return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296); }
 
 // ---------- raster helpers ----------

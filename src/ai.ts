@@ -2,6 +2,7 @@
 // The app talks straight to a public Routstr node found on Nostr; nothing goes through us.
 // The node sees the prompt and the picture it is sent, and forwards them to the model.
 import { store } from './guided';
+import { colourName } from './cutready';
 
 export interface AiModel { id: string; label: string; note: string }
 export const MODELS: AiModel[] = [
@@ -200,7 +201,7 @@ export async function shrinkForUpload(src: string, long = 1024): Promise<string>
   return c.toDataURL('image/jpeg', 0.9);
 }
 
-export interface IdeaOpts { levels: number; layers: number; colours?: string } // colours: '' = a gradient that suits the design
+export interface IdeaOpts { levels: number; layers: number; colours?: string; plan?: string[] | null } // colours: '' = a gradient that suits the design; plan: the exact colours, back sheet first
 /** The prompt for "Describe an idea": the user's own description, built up as stacked cut sheets. */
 export const IDEA_PROMPT = (idea: string, o: IdeaOpts) => {
   const d = idea.trim().replace(/\s+/g, ' ').replace(/[.\s]*$/, '');
@@ -212,7 +213,9 @@ export const IDEA_PROMPT = (idea: string, o: IdeaOpts) => {
     `The design: ${d}.`,
     'Straight-on front view. One bold design, centred and filling the frame, on a plain flat white background.',
     `Build it as exactly ${n} depth levels, from the back sheet to the top sheet. Each level is one flat colour and is cut as its own sheet. The back level is one solid shape that frames the whole design with an even margin. Each level above it is a clear, solid shape that sits on the level behind; larger shapes further back, finer details on top.`,
-    own
+    o.plan?.length
+      ? `Colours: use exactly these ${o.plan.length} flat colours and no others, one per level, from the back level to the top level: ${o.plan.map((c, k) => `${k + 1} ${c} (${colourName(c)})`).join(', ')}. Match the codes as closely as you can; the background stays pure white #ffffff and is not one of the levels.`
+      : own
       ? `Colours: ${own}. Use exactly ${n} flat colours in total, one per level${n > 3 ? '; where there are more levels than colours named, use clearly distinct in-between shades' : ''}.`
       : `Colours: a smooth gradient of ${n} clearly distinct flat tones, darkest at the back and lightest on top, in hues that suit the design.`,
     'No shading, gradients within a shape, texture, glow, shadows, reflections or 3D effects: every level is one flat colour.',
@@ -237,6 +240,7 @@ export interface PictureCheck {
   textLines?: string[];         // the lettering line by line, top to bottom
   font: string;                 // closest well-known typeface for the lettering
   shapes: string;               // one sentence on the overall shapes
+  palette?: string[];           // exact colours to trace with (a cleaned, cut-ready design), background included
 }
 export const CHECK_PROMPT = `You are preparing a picture for multi-layer laser cutting, where every flat colour becomes one cut sheet. Look at the overall shapes, not pixel noise: ignore shading, lighting, shadows between layers, paper or wood texture and camera blur - they are not colours. Reply with JSON only, no prose, in exactly this shape:
 {"kind": "short description, e.g. flat digital art / photo of a layered piece / photo / drawing",

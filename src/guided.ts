@@ -5,6 +5,8 @@ import type { AiUi } from './aiui';
 import { IDEA_PROMPT, fmtSats, fmtUsd, type PictureCheck } from './ai';
 import { nearestAspect } from './aiui';
 import { FONTS } from './lettering';
+import { RAMPS, blendPalette, colourName, fixPrompt, rampPalette } from './cutready';
+import type { CutReport } from './cutready';
 
 /** localStorage that never throws (sandboxed frames and private modes can block it). */
 export const store = {
@@ -59,7 +61,10 @@ export interface GuidedApi {
   };
   setAdvanced: (on: boolean) => void;
   ai: AiUi;
-  usePicture: (url: string, name: string, sameArt?: boolean) => Promise<void>;
+  usePicture: (url: string, name: string, sameArt?: boolean | PictureCheck) => Promise<void>;
+  parseColours: (text: string) => string[];
+  forgetPalette: () => void;
+  cutReady: (url: string, plan: string[] | null, levels: number) => Promise<{ url: string; cols: string[]; plan: string[]; report: CutReport; check: PictureCheck } | null>;
   setName: (n: string) => void;
 }
 
@@ -192,6 +197,15 @@ export function createGuided(api: GuidedApi) {
   let ideaColours = store.get('lc.ai.colours') ?? '';
   let ideaMine = !!ideaColours;
   let ideaLevels = Number(store.get('lc.ai.levels')) || 0; // 0 = auto
+  let ideaRamp = store.get('lc.ai.ramp') || 'sunset';
+  /** the last AI design made cut-ready: its plan, the original drawing and what the check found */
+  let cut: { src: string; original: string; plan: string[]; report: CutReport; w: number; h: number; name: string; aspect: string } | null = null;
+  /** the exact colours the AI is asked for, back sheet first (null: the user's words were not colours) */
+  const planFor = (levels: number): string[] | null => {
+    if (!ideaMine) return rampPalette(levels, ideaRamp);
+    const own = api.parseColours(ideaColours);
+    return own.length ? blendPalette(own, levels) : null;
+  };
   const autoLevels = () => Math.min(ideaLayers, 8);
   function ideaForm() {
     const ta = h('textarea', { class: 'aiinp', rows: 4, placeholder: 'Describe the design and the art you want, e.g. a koi fish curling round a lotus, art nouveau curves, with the words “Go with the flow”', 'aria-label': 'Describe your design', maxlength: 1200 }) as HTMLTextAreaElement;
@@ -203,13 +217,26 @@ export function createGuided(api: GuidedApi) {
       ? `The AI draws ${ideaLevels} shapes; ${ideaLayers > ideaLevels ? `the other ${ideaLayers - ideaLevels} sheets extend or repeat them.` : 'one per sheet.'}`
       : ideaLayers > 8 ? `The AI draws 8 shapes; the other ${ideaLayers - 8} sheets extend or repeat them.` : 'One drawn shape per sheet.';
     const lvNote = h('p', { class: 'note' }, levelsNote());
+    const planEl = h('div', { class: 'gfield' });
+    const paintPlan = () => {
+      const levels = Math.max(2, Math.min(ideaLayers, ideaLevels || autoLevels()));
+      const plan = planFor(levels);
+      planEl.innerHTML = '';
+      if (!plan) { planEl.append(h('p', { class: 'note' }, 'Those words are not colour names the app knows, so the AI picks the shades. Try names like teal, coral, gold or codes like #1a6b8c.')); return; }
+      const sw = h('div', { class: 'gswatches', 'aria-label': 'The colours the AI will use, back sheet first' });
+      for (const c of plan) sw.append(h('i', { style: `background:${c}`, title: `${c} ${colourName(c)}` }));
+      planEl.append(sw, h('p', { class: 'note' }, `Exactly these ${plan.length} colours, one per sheet, back to top. The app cleans the drawing to them, so each colour is one sheet.`));
+    };
+    own.addEventListener('input', paintPlan);
+    paintPlan();
     return h('div', { class: 'gfield gidea' },
       h('div', { class: 'glab' }, 'Your design'), ta,
-      stepper('Layers', () => ideaLayers, (v) => { ideaLayers = v; store.set('lc.ai.layers', String(v)); lvNote.textContent = levelsNote(); }, () => depthNote(ideaLayers)),
-      chips<boolean>('Colours', [[false, 'Gradient', 'suits the design'], [true, 'My colours']], () => ideaMine, (v) => { ideaMine = v; own.hidden = !v; if (v) own.focus(); }),
-      own,
+      stepper('Layers', () => ideaLayers, (v) => { ideaLayers = v; store.set('lc.ai.layers', String(v)); lvNote.textContent = levelsNote(); paintPlan(); }, () => depthNote(ideaLayers)),
+      chips<boolean>('Colours', [[false, 'Gradient', RAMPS[ideaRamp]?.label.toLowerCase() ?? 'sunset'], [true, 'My colours']], () => ideaMine, (v) => { ideaMine = v; own.hidden = !v; if (v) own.focus(); paintPlan(); }),
+      own, planEl,
       h('details', { class: 'gmore' }, h('summary', {}, 'More options'),
-        chips<number>('Shapes the AI draws', [[0, 'Auto'], [3, '3'], [5, '5'], [8, '8'], [12, '12']], () => ideaLevels, (v) => { ideaLevels = v; store.set('lc.ai.levels', String(v)); lvNote.textContent = levelsNote(); }),
+        chips<number>('Shapes the AI draws', [[0, 'Auto'], [3, '3'], [5, '5'], [8, '8'], [12, '12']], () => ideaLevels, (v) => { ideaLevels = v; store.set('lc.ai.levels', String(v)); lvNote.textContent = levelsNote(); paintPlan(); }),
+        chips<string>('Gradient', Object.entries(RAMPS).map(([k, r]) => [k, r.label] as [string, string]), () => ideaRamp, (v) => { ideaRamp = v; store.set('lc.ai.ramp', v); paintPlan(); }),
         lvNote,
         depthChips(() => {}),
         h('p', { class: 'note' }, 'Laser artists often stack more sheets than colours: Extend steps each shape in for a terraced edge, Repeat stacks copies for depth. Change it any time on the Layers step.')),
@@ -218,13 +245,13 @@ export function createGuided(api: GuidedApi) {
         if (idea.length < 3) { api.toast('Describe your design first'); ta.focus(); return; }
         const levels = Math.max(2, Math.min(ideaLayers, ideaLevels || autoLevels()));
         const mine = ideaMine ? ideaColours.trim() : '';
-        const url = await api.ai.create(IDEA_PROMPT(idea, { levels, layers: ideaLayers, colours: mine }), undefined, '3:4', () => busy('Drawing your design…'));
+        const plan = planFor(levels);
+        const url = await api.ai.create(IDEA_PROMPT(idea, { levels, layers: ideaLayers, colours: mine, plan }), undefined, '3:4', () => busy('Drawing your design…'));
         if (url) {
           api.projects.startNew();
           const name = idea.split(/\s+/).slice(0, 4).join(' ').replace(/[^\p{L}\p{N} '-]/gu, '').slice(0, 40) || 'AI idea';
-          S.traceColours = levels; S.traceLayers = ideaLayers; S.traceColourMode = mine ? 'picture' : 'gradient'; S.traceDarkFirst = false;
-          await api.usePicture(url, `${name}.png`);
-          S.traceColours = levels; S.traceLayers = ideaLayers; S.traceColourMode = mine ? 'picture' : 'gradient'; S.traceDarkFirst = false;
+          await useDesign(url, plan, levels, `${name}.png`, '3:4');
+          S.traceLayers = ideaLayers; S.traceColourMode = plan || mine ? 'picture' : 'gradient'; S.traceDarkFirst = false;
           api.setName(name.charAt(0).toUpperCase() + name.slice(1));
           if (!S.traceFollow) { S.traceFollow = true; api.fitToArtwork(); }
           api.changed(true);
@@ -233,6 +260,58 @@ export function createGuided(api: GuidedApi) {
         busy('');
       }),
       h('p', { class: 'note' }, `Made with ${api.ai.modelLabel()} from your description, in flat colours ready to trace.`));
+  }
+  /** clean an AI design to its planned colours, check it can be cut, fix what can be fixed here */
+  async function useDesign(url: string, plan: string[] | null, levels: number, name: string, aspect: string) {
+    // colours the AI chose itself are left to the tracer: cleaning only helps when the app planned them
+    if (!plan) { await api.usePicture(url, name); cut = null; return; }
+    busy('Checking it can be cut…');
+    const r = await api.cutReady(url, plan, levels);
+    if (!r) { await api.usePicture(url, name); cut = null; return; }
+    S.traceDepthBy = 'colour';
+    await api.usePicture(r.url, name, r.check);
+    const im = await new Promise<HTMLImageElement>((res) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => res(i); i.src = r.url; });
+    cut = { src: api.picture().src, original: url, plan: r.plan, report: r.report, w: im.naturalWidth, h: im.naturalHeight, name, aspect };
+  }
+  /** what the cut check found, in plain words; big problems offer an AI redraw with a precise note */
+  function cutCard() {
+    if (!cut || api.picture().src !== cut.src) return null;
+    const c = cut, r = c.report, n = c.plan.length - r.missing.length;
+    const done: string[] = [`Cleaned to exactly ${n} flat colour${n === 1 ? '' : 's'}, one per sheet`];
+    if (r.specks) done.push(r.specks > 200 ? 'removed stray specks' : `removed ${r.specks} speck${r.specks === 1 ? '' : 's'}`);
+    if (r.thickened) done.push(`strengthened ${r.thickened} thin part${r.thickened === 1 ? '' : 's'} so ${r.thickened === 1 ? 'it survives' : 'they survive'} cutting`);
+    const left: string[] = [];
+    for (const k of r.missing) left.push(`Sheet ${k + 1} (${colourName(c.plan[k])}) is missing from the drawing.`);
+    for (const [a, b] of r.merged) left.push(`Sheets ${a + 1} and ${b + 1} came out the same colour.`);
+    if (r.unknown >= 0.03) left.push(`${Math.round(r.unknown * 100)}% of the design uses colours that were not asked for; they joined the nearest sheet.`);
+    const redo = async () => {
+      const url = await api.ai.create(fixPrompt(c.plan, r), c.original, c.aspect, () => busy('Asking the AI to fix it…'));
+      if (url) { await useDesign(url, c.plan, c.plan.length, c.name, c.aspect); api.changed(true); api.toast(cut?.report.ready ? 'Fixed. Ready to cut.' : 'Redrawn. See what is left to fix.'); }
+      busy(''); draw();
+    };
+    return h('div', { class: 'gok' + (r.ready ? '' : ' warn') },
+      h('b', {}, r.ready ? 'Ready to cut' : 'Nearly ready to cut'),
+      h('p', {}, done.join(', ') + '.'),
+      ...left.map((t) => h('p', {}, t)),
+      r.thickened ? h('p', {}, 'Rings on the picture show where parts were strengthened.') : null,
+      r.ready ? null : aiButton('Ask the AI to fix it', redo, undefined, ''),
+      r.ready ? null : h('p', { class: 'note' }, 'Or press Next: the app cuts what is there.'));
+  }
+  /** the cleaned picture, with rings where thin parts were strengthened */
+  function cutFigure(src: string, alt: string) {
+    const box = h('div', { class: 'gcutbox' }, h('img', { src, alt }));
+    const fig = h('figure', { class: 'gpic' }, box);
+    if (cut && cut.src === src && cut.report.spots.length) {
+      const ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg');
+      svg.setAttribute('viewBox', `0 0 ${cut.w} ${cut.h}`); svg.setAttribute('preserveAspectRatio', 'xMidYMid meet'); svg.setAttribute('aria-hidden', 'true');
+      for (const p of cut.report.spots.slice(0, 40)) {
+        const e = document.createElementNS(ns, 'circle');
+        e.setAttribute('cx', String(p.x)); e.setAttribute('cy', String(p.y)); e.setAttribute('r', String(Math.max(cut.w / 28, p.r)));
+        svg.append(e);
+      }
+      box.append(svg);
+    }
+    return fig;
   }
   const ago = (t: number) => {
     const m = Math.round((Date.now() - t) / 60000);
@@ -282,18 +361,19 @@ export function createGuided(api: GuidedApi) {
       return [
         h('h2', {}, 'Your picture'),
         lead('This is what the layers are made from. The preview shows the first trace.'),
-        h('figure', { class: 'gpic' }, h('img', { src: p.src, alt: p.name || 'Your picture' }), h('figcaption', {}, p.name || 'Picture')),
+        (() => { const f = cutFigure(p.src, p.name || 'Your picture'); f.append(h('figcaption', {}, p.name || 'Picture')); return f; })(),
+        ...[cutCard()].filter((x): x is HTMLElement => !!x),
         h('div', { class: 'gbtns' }, h('button', { class: 'btn', onclick: () => api.pickPicture() }, 'Choose a different picture')),
         ...(() => {
           const info = api.pictureInfo();
-          if (!info) return [];
+          if (!info || (cut && cut.src === p.src)) return [];
           if (info.shaded) return isRedraw() ? [] : [flattenFirstCard()];
           const sw = h('div', { class: 'gswatches', 'aria-label': 'Colours found' });
           for (const f of info.found) sw.append(h('i', { style: `background:${f.hex}`, title: f.hex }));
           return [h('div', { class: 'gfield' }, h('div', { class: 'glab' }, `Found ${info.colours} flat colours`), sw,
             h('p', { class: 'note' }, info.plainBg ? 'The plain background is left out and the outline follows your artwork. Each other colour becomes a sheet.' : 'Each colour becomes a sheet.'))];
         })(),
-        checkCard(),
+        ...(cut && cut.src === p.src ? [] : [checkCard()]),
       ];
     } },
     { id: 'flat', label: 'Flatten', view: 'stack', needsPicture: true, body: () => {
@@ -338,7 +418,7 @@ export function createGuided(api: GuidedApi) {
         if (info && !info.shaded) opts.push([info.colours, `${info.colours}`, 'as found']);
         for (const n of [5, 7, 9, 12]) if (!opts.some((o) => o[0] === n)) opts.push([n, String(n)]);
         opts.sort((a, b) => a[0] - b[0]);
-        return chips('Colours', opts, () => S.traceColours, (v) => { S.traceColours = v; api.changed(true); });
+        return chips('Colours', opts, () => S.traceColours, (v) => { S.traceColours = v; api.forgetPalette(); api.changed(true); });
       })(),
       ...(api.pictureCheck()?.text ? [chips<string>('Lettering', [['', 'As traced'], ...FONTS.map((f) => [f.id, f.label] as [string, string])], () => S.traceFont ?? '', (v) => { S.traceFont = v; api.changed(); })] : []),
       chips('Edges', [[0.9, 'Soft', 'flowing curves'], [0.45, 'Crisp', 'more detail'], [0.3, 'Exact', 'clean flat art']], () => (S.traceSmooth >= 0.55 ? 0.9 : S.traceSmooth >= 0.38 ? 0.45 : 0.3), (v) => { S.traceSmooth = v; api.changed(); }),
@@ -368,7 +448,6 @@ export function createGuided(api: GuidedApi) {
             h('button', { class: `btn ${on ? 'primary' : ''}`, 'aria-pressed': on ? 'true' : 'false', onclick: () => { api.setFixMode(!on); draw(); } }, on ? 'Done fixing' : 'Tap a shape to fix it'),
             h('p', { class: 'note' }, on ? 'Tap any shape in the preview and say how it sits. Similar shapes follow, and the app remembers for your next pictures.' : 'Wrong sheet somewhere? Correct it, and the app learns from you.'),
             h('p', { class: 'note' }, `${api.fixCount() ? `${api.fixCount()} fixes on this picture. ` : ''}${n ? `Learnt from ${n} fix${n === 1 ? '' : 'es'}, stored only in this browser.` : ''}${api.builtInLessons() ? ` Starts from ${api.builtInLessons()} built-in lessons.` : ''}`),
-            n ? h('button', { class: 'btn small ghost', title: 'Numbers only: how each fixed shape sat and what you chose. No pictures.', onclick: () => api.saveLessons() }, 'Save my lessons') : null,
             api.fixCount() ? h('button', { class: 'btn small ghost', onclick: () => { api.clearFixes(); draw(); } }, 'Undo fixes on this picture') : null,
             n ? h('button', { class: 'btn small ghost', onclick: () => { if (confirm('Forget everything the app has learnt from your fixes?')) { api.forgetLearning(); draw(); } } }, 'Forget what it learnt') : null);
         })() : null,
