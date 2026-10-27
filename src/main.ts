@@ -108,7 +108,7 @@ const LOGO = `<svg viewBox="0 0 40 40" width="30" height="30" aria-label="Layerc
 const app = $('#app');
 app.innerHTML = `
 <header class="top">
-  <div class="brand">${LOGO}<div><div class="name">Layercraft <span>Stack</span></div><div class="tag">Layered laser-cut art generator</div></div></div>
+  <div class="brand">${LOGO}<div><div class="name">Layercraft <span>Stack</span></div><div class="tag">Layered laser-cut art generator <span class="ver" title="Version">v${__APP_VERSION__}</span></div></div></div>
   <input class="pname" id="pname" value="${projectName}" aria-label="Project name" spellcheck="false"/>
   <button class="btn ghost modebtn" id="mode" aria-pressed="false">Advanced</button>
   <div class="actions">

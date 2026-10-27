@@ -476,3 +476,4 @@ body.guided.gnohero .toolbar, body.guided.gnohero footer.status { visibility: hi
 .aibtn.stopping > * { display: none; }
 .aibtn.stopping::after { content: 'Stop'; font-weight: 600; }
 @media (max-width: 860px) { body.guided.gnohero.gmagicon #viewport { display: block; min-height: 46vh; } }
+.brand .tag .ver { opacity: .6; font-variant-numeric: tabular-nums; margin-left: 4px; }

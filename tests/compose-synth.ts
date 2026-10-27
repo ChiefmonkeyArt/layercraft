@@ -1,7 +1,8 @@
 // Hero + Pop combined into one stack, traced through the exact height map: every traced sheet must
 // match the planned heights (a Pop shape on sheet s is material on every sheet below it).
 import { PNG } from 'pngjs';
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+mkdirSync('/tmp/tt', { recursive: true });
 import { rampPalette, snapToPlan, checkAndFix, render } from '../src/cutready';
 import { compose, labelsOf, spreadPlace, mergePlace, type PopPlace } from '../src/compose';
 import { trace } from '../src/trace';

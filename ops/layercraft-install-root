@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# layercraft-install-root — pinned root installer for Layercraft Stack.
+#
+# Invoked ONLY by /usr/local/bin/layercraft-deploy via a fixed-path sudoers
+# rule; never called interactively. Owned root:root 0755 and not writable by
+# the deploy user, so what it does is fixed whatever the payload says.
+#
+#   layercraft-install-root <tarball>                  atomic install
+#   layercraft-install-root --validate-only <tarball>  check payload, no changes
+#
+# Install: copy the payload to a root-only work dir, re-validate it with the
+# same allowlist, extract regular files only, check VERSION, flip
+# /apps/layercraft/current, write the nginx fragment, `nginx -t` with automatic
+# rollback, register the launcher tile at VERSION, reload, keep 5 releases.
+set -euo pipefail
+umask 022
+
+# --- BEGIN validate_payload (keep identical in layercraft-deploy and layercraft-install-root) ---
+MAX_UNPACKED_BYTES=$((160 * 1024 * 1024))
+validate_payload() {
+  local tb="$1" listing line perms size name extra total=0 seen=" " f base
+  listing="$(LC_ALL=C tar --numeric-owner -tvzf "$tb" 2>/dev/null)" || { echo "error: payload is not a valid gzip tarball" >&2; return 1; }
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    # GNU tar -tv: <perms> <uid/gid> <size> <date> <time> <name>
+    read -r perms _ size _ _ name extra <<<"$line"
+    [[ -z "${extra:-}" ]] || { echo "error: unexpected entry: '$line'" >&2; return 1; }
+    [[ "$seen" != *" $name "* ]] || { echo "error: duplicate entry '$name'" >&2; return 1; }
+    seen+="$name "
+    case "${perms:0:1}" in
+      d) [[ "$name" =~ ^(assets|fonts|demo|ort|models|models/depth-anything-v2-small|models/depth-anything-v2-small/onnx)/$ ]] \
+           || { echo "error: unexpected folder '$name'" >&2; return 1; } ;;
+      -) base="${name##*/}"
+         [[ "$name" =~ ^(VERSION|index\.html|(assets|fonts|demo|ort)/[A-Za-z0-9_][A-Za-z0-9._-]*|models/depth-anything-v2-small/(onnx/)?[A-Za-z0-9_][A-Za-z0-9._-]*)$ ]] \
+           || { echo "error: unexpected file '$name'" >&2; return 1; }
+         [[ "$name" == VERSION || "$base" =~ \.(html|js|mjs|css|wasm|onnx|json|woff2|woff|ttf|png|jpg|jpeg|webp|svg|txt)$ ]] \
+           || { echo "error: file type not allowed: '$name'" >&2; return 1; }
+         [[ "$size" =~ ^[0-9]+$ ]] || { echo "error: bad size for '$name'" >&2; return 1; }
+         total=$((total + size)) ;;
+      *) echo "error: '$name' is not a regular file or folder" >&2; return 1 ;;
+    esac
+  done <<<"$listing"
+  (( total <= MAX_UNPACKED_BYTES )) || { echo "error: payload too large ($total bytes)" >&2; return 1; }
+  for f in index.html VERSION; do
+    [[ "$seen" == *" $f "* ]] || { echo "error: required file '$f' missing" >&2; return 1; }
+  done
+}
+# --- END validate_payload ---
+
+if [[ "${1:-}" == "--validate-only" ]]; then
+  [[ "$#" -eq 2 && -f "$2" ]] || { echo "usage: layercraft-install-root --validate-only <tarball>" >&2; exit 2; }
+  validate_payload "$2" && echo "payload ok"
+  exit $?
+fi
+
+APP="layercraft"
+APP_ROOT="/apps/${APP}"
+RELEASES="${APP_ROOT}/releases"
+RELEASE_DIR="${RELEASES}/$(date -u +%Y%m%d-%H%M%S)"
+CURRENT_LINK="${APP_ROOT}/current"
+FRAGMENT_DIR="/opt/torii/nginx-fragments"
+FRAGMENT_FILE="${FRAGMENT_DIR}/${APP}.conf"
+BACKUP_DIR="/var/backups/layercraft"
+DISPLAY_NAME="Layercraft"
+DESCRIPTION="Layered laser-cut art: describe it, stack it, export the SVG"
+KEEP_RELEASES=5
+
+log() { printf '==> %s\n' "$*"; }
+die() { printf 'xx  %s\n' "$*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || die "must run as root"
+[[ "$#" -eq 1 && -f "$1" ]] || die "usage: layercraft-install-root <tarball>"
+
+WORK="$(mktemp -d /run/layercraft-install.XXXXXX)"
+trap 'rm -rf "$WORK"; rm -f "$1"' EXIT
+install -m 0600 "$1" "$WORK/payload.tar.gz"
+validate_payload "$WORK/payload.tar.gz" || die "payload rejected"
+
+install -d -m 0755 "$RELEASES"
+install -d -m 0700 "$BACKUP_DIR"
+install -d -m 0755 "$RELEASE_DIR"
+tar -xzf "$WORK/payload.tar.gz" -C "$RELEASE_DIR" --no-same-owner --no-same-permissions --no-overwrite-dir
+if find "$RELEASE_DIR" -mindepth 1 \( -type l -o \( ! -type f ! -type d \) \) | grep -q .; then
+  rm -rf "$RELEASE_DIR"; die "release contains something other than files and folders"
+fi
+for f in index.html VERSION; do
+  [[ -f "$RELEASE_DIR/$f" && ! -L "$RELEASE_DIR/$f" ]] || { rm -rf "$RELEASE_DIR"; die "extracted '$f' is not a regular file"; }
+done
+VERSION="$(head -c 32 "$RELEASE_DIR/VERSION" | tr -d '[:space:]')"
+[[ "$VERSION" =~ ^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$ ]] || { rm -rf "$RELEASE_DIR"; die "invalid VERSION '$VERSION'"; }
+find "$RELEASE_DIR" -type d -exec chmod 0755 {} +
+find "$RELEASE_DIR" -type f -exec chmod 0644 {} +
+chown -R root:www-data "$RELEASE_DIR"
+log "release ${RELEASE_DIR} (v${VERSION})"
+
+PREV_RELEASE="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+ln -sfn "$RELEASE_DIR" "${CURRENT_LINK}.new" && mv -Tf "${CURRENT_LINK}.new" "$CURRENT_LINK"
+log "current -> ${RELEASE_DIR}"
+
+install -d -m 0755 "$FRAGMENT_DIR"
+HAD_FRAGMENT=0
+if [[ -f "$FRAGMENT_FILE" ]]; then cp -p "$FRAGMENT_FILE" "$BACKUP_DIR/${APP}.conf.prev"; HAD_FRAGMENT=1; fi
+cat > "$WORK/fragment.conf" <<'NGINX'
+# /opt/torii/nginx-fragments/layercraft.conf — Layercraft Stack.
+# Written by /usr/local/sbin/layercraft-install-root; do not edit by hand.
+# Static app only: the browser talks to Routstr nodes and Nostr relays itself.
+location /layercraft/ {
+    alias /apps/layercraft/current/;
+    types {
+        text/html html;
+        text/css css;
+        application/javascript js mjs;
+        application/json json;
+        application/wasm wasm;
+        application/octet-stream onnx;
+        font/woff2 woff2;
+        font/woff woff;
+        font/ttf ttf;
+        image/png png;
+        image/jpeg jpg jpeg;
+        image/webp webp;
+        image/svg+xml svg;
+        text/plain txt;
+    }
+    default_type application/octet-stream;
+    gzip on;
+    gzip_vary on;
+    gzip_comp_level 6;
+    gzip_min_length 1024;
+    gzip_types application/javascript application/json text/css text/plain application/wasm image/svg+xml;
+    add_header Cache-Control "public, max-age=3600" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=(self)" always;
+}
+location ^~ /layercraft/assets/ {
+    alias /apps/layercraft/current/assets/;
+    types {
+        text/html html;
+        text/css css;
+        application/javascript js mjs;
+        application/json json;
+        application/wasm wasm;
+        application/octet-stream onnx;
+        font/woff2 woff2;
+        font/woff woff;
+        font/ttf ttf;
+        image/png png;
+        image/jpeg jpg jpeg;
+        image/webp webp;
+        image/svg+xml svg;
+        text/plain txt;
+    }
+    default_type application/octet-stream;
+    gzip on;
+    gzip_vary on;
+    gzip_types application/javascript application/json text/css application/wasm;
+    # file names carry a content hash, so they never change
+    add_header Cache-Control "public, max-age=31536000, immutable" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=(self)" always;
+}
+location = /layercraft {
+    return 301 /layercraft/;
+}
+location = /layercraft/index.html {
+    alias /apps/layercraft/current/index.html;
+    default_type text/html;
+    gzip on;
+    gzip_vary on;
+    add_header Cache-Control "no-store" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=(self)" always;
+}
+location = /layercraft/VERSION {
+    alias /apps/layercraft/current/VERSION;
+    default_type text/plain;
+    add_header Cache-Control "no-store" always;
+    add_header X-Content-Type-Options "nosniff" always;
+}
+NGINX
+install -m 0644 "$WORK/fragment.conf" "$FRAGMENT_FILE"
+
+if ! nginx -t >/dev/null 2>"$WORK/nginx-t.log"; then
+  cat "$WORK/nginx-t.log" >&2
+  if [[ "$HAD_FRAGMENT" -eq 1 ]]; then install -m 0644 "$BACKUP_DIR/${APP}.conf.prev" "$FRAGMENT_FILE"; else rm -f "$FRAGMENT_FILE"; fi
+  if [[ -n "$PREV_RELEASE" && -d "$PREV_RELEASE" ]]; then ln -sfn "$PREV_RELEASE" "${CURRENT_LINK}.new" && mv -Tf "${CURRENT_LINK}.new" "$CURRENT_LINK"; fi
+  rm -rf "$RELEASE_DIR"
+  die "nginx -t failed; fragment and release rolled back"
+fi
+
+log "registering launcher tile '${APP}' v${VERSION}"
+/usr/local/bin/torii register "$APP" --display "$DISPLAY_NAME" --desc "$DESCRIPTION" --version "$VERSION"
+log "reloading nginx"
+/usr/local/bin/torii reload
+
+# Prune: keep the newest KEEP_RELEASES releases, never the current one.
+CUR="$(readlink -f "$CURRENT_LINK")"
+find "$RELEASES" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*-[0-9]*' -printf '%f\n' | sort -r \
+  | tail -n +$((KEEP_RELEASES + 1)) | while IFS= read -r d; do
+      [[ "$RELEASES/$d" == "$CUR" ]] || rm -rf -- "${RELEASES:?}/$d"
+    done
+
+log "done: layercraft v${VERSION} live at /layercraft/"

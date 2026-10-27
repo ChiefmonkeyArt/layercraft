@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# layercraft-deploy — forced-command entrypoint for the Layercraft deploy key.
+#
+# sshd runs this AS the deploy user whenever the restricted key connects; the
+# key grants no shell, no pty and no forwarding. It:
+#   1. reads a gzipped tarball of the built app on stdin (size-capped),
+#   2. checks it against a strict allowlist: only the app's own folders and
+#      file types, regular files only, no links, no hidden names, no duplicates,
+#   3. hands it to the pinned root installer through one fixed-path sudoers rule.
+#
+# Installed by ops/bootstrap-vps.sh from this exact file. Nothing else is
+# possible through this key.
+set -euo pipefail
+umask 077
+
+STAGE_DIR="/var/lib/layercraft-deploy"
+STAGE="${STAGE_DIR}/incoming.tar.gz"
+MAX_PAYLOAD_BYTES=$((128 * 1024 * 1024))
+
+# --- BEGIN validate_payload (keep identical in layercraft-deploy and layercraft-install-root) ---
+MAX_UNPACKED_BYTES=$((160 * 1024 * 1024))
+validate_payload() {
+  local tb="$1" listing line perms size name extra total=0 seen=" " f base
+  listing="$(LC_ALL=C tar --numeric-owner -tvzf "$tb" 2>/dev/null)" || { echo "error: payload is not a valid gzip tarball" >&2; return 1; }
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    # GNU tar -tv: <perms> <uid/gid> <size> <date> <time> <name>
+    read -r perms _ size _ _ name extra <<<"$line"
+    [[ -z "${extra:-}" ]] || { echo "error: unexpected entry: '$line'" >&2; return 1; }
+    [[ "$seen" != *" $name "* ]] || { echo "error: duplicate entry '$name'" >&2; return 1; }
+    seen+="$name "
+    case "${perms:0:1}" in
+      d) [[ "$name" =~ ^(assets|fonts|demo|ort|models|models/depth-anything-v2-small|models/depth-anything-v2-small/onnx)/$ ]] \
+           || { echo "error: unexpected folder '$name'" >&2; return 1; } ;;
+      -) base="${name##*/}"
+         [[ "$name" =~ ^(VERSION|index\.html|(assets|fonts|demo|ort)/[A-Za-z0-9_][A-Za-z0-9._-]*|models/depth-anything-v2-small/(onnx/)?[A-Za-z0-9_][A-Za-z0-9._-]*)$ ]] \
+           || { echo "error: unexpected file '$name'" >&2; return 1; }
+         [[ "$name" == VERSION || "$base" =~ \.(html|js|mjs|css|wasm|onnx|json|woff2|woff|ttf|png|jpg|jpeg|webp|svg|txt)$ ]] \
+           || { echo "error: file type not allowed: '$name'" >&2; return 1; }
+         [[ "$size" =~ ^[0-9]+$ ]] || { echo "error: bad size for '$name'" >&2; return 1; }
+         total=$((total + size)) ;;
+      *) echo "error: '$name' is not a regular file or folder" >&2; return 1 ;;
+    esac
+  done <<<"$listing"
+  (( total <= MAX_UNPACKED_BYTES )) || { echo "error: payload too large ($total bytes)" >&2; return 1; }
+  for f in index.html VERSION; do
+    [[ "$seen" == *" $f "* ]] || { echo "error: required file '$f' missing" >&2; return 1; }
+  done
+}
+# --- END validate_payload ---
+
+mkdir -p "$STAGE_DIR"
+# Read at most MAX+1 bytes so an oversized stream is detected, not truncated.
+if ! head -c $((MAX_PAYLOAD_BYTES + 1)) > "$STAGE"; then
+  echo "error: failed to read payload" >&2; rm -f "$STAGE"; exit 1
+fi
+size="$(stat -c%s "$STAGE" 2>/dev/null || echo 0)"
+if [[ "$size" == "0" ]]; then echo "error: empty payload" >&2; rm -f "$STAGE"; exit 1; fi
+if (( size > MAX_PAYLOAD_BYTES )); then echo "error: payload exceeds ${MAX_PAYLOAD_BYTES} bytes" >&2; rm -f "$STAGE"; exit 1; fi
+validate_payload "$STAGE" || { rm -f "$STAGE"; exit 1; }
+
+# The sudoers rule permits ONLY this exact root-owned path.
+exec sudo -n /usr/local/sbin/layercraft-install-root "$STAGE"

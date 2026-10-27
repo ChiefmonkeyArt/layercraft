@@ -1,0 +1,111 @@
+name: Deploy Layercraft to VPS
+
+# Installs the static app on the owner's VPS at /layercraft/ and its Torii Base
+# launcher tile. Runs only when started by hand from a release tag.
+#
+# Dedicated deployment: this repo has its OWN restricted deploy key. sshd forces
+# it to run ONLY /usr/local/bin/layercraft-deploy (no shell, no pty, no
+# forwarding), which checks the payload against an allowlist and hands it to a
+# pinned root installer through one fixed sudoers rule (see ops/).
+# The VPS host key must match VPS_DEPLOY_HOST_KEY before anything is sent.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: layercraft-vps-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Require release tag == VERSION
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          v="$(tr -d '[:space:]' < VERSION)"
+          if [[ "$REF_TYPE" != "tag" || "$REF_NAME" != "v$v" ]]; then
+            echo "::error::deploy must run from tag v$v (got $REF_TYPE '$REF_NAME'): gh workflow run deploy.yml --ref v$v"
+            exit 1
+          fi
+
+      - name: Build and check
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npx tsc --noEmit -p .
+          npx vite build
+          npm run test:compose
+          bash tools/test-ops.sh
+          bash tools/pack.sh layercraft-release.tar.gz
+
+      - name: Install SSH key (host key verified)
+        env:
+          SSH_KEY: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
+          SSH_HOST: ${{ secrets.VPS_DEPLOY_HOST }}
+          VPS_DEPLOY_HOST_KEY: ${{ secrets.VPS_DEPLOY_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${SSH_KEY:-}" || -z "${SSH_HOST:-}" || -z "${VPS_DEPLOY_HOST_KEY:-}" ]]; then
+            echo "::error::VPS_DEPLOY_SSH_KEY, VPS_DEPLOY_HOST or VPS_DEPLOY_HOST_KEY secret is not set"
+            exit 1
+          fi
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          umask 077
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519_deploy
+          host_only="${SSH_HOST#*@}"
+          scan="$(mktemp)"
+          ssh-keyscan -T 10 -t ed25519 "$host_only" > "$scan" 2>/dev/null || true
+          live_fp="$(ssh-keygen -lf "$scan" -E sha256 2>/dev/null | awk 'NF>=2 {print $2}' | head -n1)"
+          expected_fp="${VPS_DEPLOY_HOST_KEY}"
+          [[ "$expected_fp" == SHA256:* ]] || expected_fp="SHA256:${expected_fp}"
+          if [[ -z "$live_fp" || "$live_fp" != "$expected_fp" ]]; then
+            echo "::error::VPS host key mismatch: expected $expected_fp, got ${live_fp:-<none>}"
+            exit 1
+          fi
+          cat "$scan" >> ~/.ssh/known_hosts; rm -f "$scan"
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy through the restricted key
+        env:
+          SSH_HOST: ${{ secrets.VPS_DEPLOY_HOST }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519_deploy -o IdentitiesOnly=yes -o BatchMode=yes \
+              -o ConnectTimeout=15 -o StrictHostKeyChecking=yes "$SSH_HOST" < layercraft-release.tar.gz
+
+      - name: Verify live
+        env:
+          SSH_HOST: ${{ secrets.VPS_DEPLOY_HOST }}
+        run: |
+          set -euo pipefail
+          host_only="${SSH_HOST#*@}"; want="$(tr -d '[:space:]' < VERSION)"
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://${host_only}/layercraft/")
+            live="$(curl -s "https://${host_only}/layercraft/VERSION" | tr -d '[:space:]')"
+            echo "poll $i: http=$code version=${live:-?}"
+            if [ "$code" = "200" ] && [ "$live" = "$want" ]; then echo "layercraft v$live is live"; exit 0; fi
+            sleep 5
+          done
+          echo "::error::layercraft not serving v$want after retries"
+          exit 1
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519_deploy ~/.ssh/known_hosts layercraft-release.tar.gz

@@ -273,7 +273,7 @@ export function createAiUi(h: H, toast: (m: string) => void) {
             setSession(null); credit = null; changed();
             if (store.get('lc.ai.synced') && hasSigner()) { void pushSession(null).catch(() => undefined); store.set('lc.ai.synced', ''); }
           }
-          if (r.token) void viewToken(r.token, r.sats);
+          if (r.token) { if (ln.value.trim()) toast(`${s.name} can’t pay a Lightning address, so it gave a Cashu token instead. Paste it into any Cashu wallet.`); void viewToken(r.token, r.sats); }
           else { body.innerHTML = ''; body.append(h('p', { class: 'glead' }, `Refunded ${r.sats ? fmtSats(Number(r.sats)) : 'your credit'} to ${r.recipient ?? ln.value}.${current ? ' Session ended.' : ''}`), h('button', { class: 'btn', onclick: () => dlg.close() }, 'Done')); }
         } catch (e: any) {
           if (e?.status === 409) st.textContent = 'A refund is already in progress. Try again in a moment.';

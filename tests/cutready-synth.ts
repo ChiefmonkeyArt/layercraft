@@ -1,7 +1,8 @@
 import { rampPalette, snapToPlan, checkAndFix, render, colourName, dE } from '../src/cutready';
 import { hexRgb } from '../src/trace';
 import { PNG } from 'pngjs';
-import { writeFileSync } from 'fs';
+import { writeFileSync, mkdirSync } from 'fs';
+mkdirSync('/tmp/tt', { recursive: true });
 // a 900×1200 AI-like picture: soft edges, noise, colour drift, specks, a thin neck and a thin strand
 export function synth(plan: string[], skip = -1, shade = 0) {
   const W = 900, H = 1200, S = 3, n = plan.length;
