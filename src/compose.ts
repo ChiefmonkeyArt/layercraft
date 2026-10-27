@@ -11,7 +11,7 @@ import { hexRgb } from './trace';
 /** Where one Pop level goes: merged onto a Hero sheet, or on its own sheet just above it. */
 export interface PopPlace { hero: number; own: boolean } // hero: Hero level index (0 = back)
 
-export interface Slot { hero?: number; pops: number[] } // one final sheet, back first
+export interface Slot { hero?: number; pops: number[]; frame?: boolean } // one final sheet, back first
 
 /** The final sheets, back first. Pop levels on their own sheets above the same Hero level stay in Pop order. */
 export function slotsOf(nHero: number, place: PopPlace[]): { slots: Slot[]; heroSlot: number[]; popSlot: number[] } {
@@ -62,9 +62,29 @@ export interface Raster { width: number; height: number; data: Uint8ClampedArray
 export interface Composite { colour: Raster; map: Raster; n: number; palette: string[]; slots: Slot[]; heroSlot: number[]; popSlot: number[] }
 
 /** Hero and Pop (labels on the same grid) combined into a colour picture and an exact height map. */
-export function compose(w: number, h: number, hero: Int8Array, heroPlan: string[], pop: Int8Array | null, popPlan: string[], place: PopPlace[]): Composite {
+export function compose(w: number, h: number, hero: Int8Array, heroPlan: string[], pop: Int8Array | null, popPlan: string[], place: PopPlace[], frameTop = true): Composite {
   const { slots, heroSlot, popSlot } = slotsOf(heroPlan.length, pop ? place : []);
-  const n = slots.length, N = w * h;
+  const N = w * h;
+  // the Hero's frame (its back level where it shows round the outside) is raised to its own top
+  // sheet: the outline of every sheet hides under it, as on a framed piece
+  let frame: Uint8Array | null = null;
+  if (frameTop) {
+    frame = new Uint8Array(N);
+    const vis0 = (i: number) => hero[i] === 0 && !(pop && pop[i] >= 0);
+    const q: number[] = [];
+    for (let i = 0; i < N; i++) {
+      if (!vis0(i)) continue;
+      const x = i % w, y = (i / w) | 0;
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1 || hero[i - 1] < 0 || hero[i + 1] < 0 || hero[i - w] < 0 || hero[i + w] < 0) { frame[i] = 1; q.push(i); }
+    }
+    while (q.length) {
+      const i = q.pop()!, x = i % w;
+      for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]) if (j >= 0 && j < N && !frame[j] && vis0(j)) { frame[j] = 1; q.push(j); }
+    }
+    let any = 0; for (let i = 0; i < N; i++) any += frame[i];
+    if (any < N * 0.002) frame = null; else slots.push({ pops: [], frame: true });
+  }
+  const n = slots.length;
   // a Pop pixel of level k is material on Pop sheets 0..k: its height is the highest of their slots
   const popTop = popSlot.map((_, k) => Math.max(...popSlot.slice(0, k + 1)));
   const colour: Raster = { width: w, height: h, data: new Uint8ClampedArray(N * 4) }, map: Raster = { width: w, height: h, data: new Uint8ClampedArray(N * 4) };
@@ -75,7 +95,7 @@ export function compose(w: number, h: number, hero: Int8Array, heroPlan: string[
     const hh = hl >= 0 ? heroSlot[hl] : -1, ph = pl >= 0 ? popTop[pl] : -1;
     const o = i * 4;
     if (hh < 0 && ph < 0) { colour.data[o] = colour.data[o + 1] = colour.data[o + 2] = 255; colour.data[o + 3] = 255; map.data[o + 3] = 255; continue; }
-    const c = ph >= hh ? PC[pl] : HC[hl], g = grey[Math.max(hh, ph)];
+    const c = ph >= hh ? PC[pl] : HC[hl], g = grey[frame && frame[i] ? n - 1 : Math.max(hh, ph)];
     colour.data[o] = c[0]; colour.data[o + 1] = c[1]; colour.data[o + 2] = c[2]; colour.data[o + 3] = 255;
     map.data[o] = map.data[o + 1] = map.data[o + 2] = g; map.data[o + 3] = 255;
   }

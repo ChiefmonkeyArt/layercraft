@@ -229,7 +229,7 @@ export function createAiUi(h: H, toast: (m: string) => void) {
   }
 
   /** Make one picture; asks for credit first if there is none. `use` overrides the model (the flat redraw). */
-  async function create(prompt: string, ref: string | undefined, aspect: string, onStart: () => void, use?: string): Promise<string | null> {
+  async function create(prompt: string, ref: string | string[] | undefined, aspect: string, onStart: () => void, use?: string): Promise<string | null> {
     const s = getSession();
     if (!s) { open(() => toast('Credit added. Press the button again to create.')); return null; }
     let m = use ?? model;
@@ -243,7 +243,7 @@ export function createAiUi(h: H, toast: (m: string) => void) {
     }
     onStart();
     try {
-      const refUrl = ref ? await shrinkForUpload(ref) : undefined;
+      const refUrl = Array.isArray(ref) ? await Promise.all(ref.map((r) => shrinkForUpload(r))) : ref ? await shrinkForUpload(ref) : undefined;
       const url = await generateImage(s, m, prompt, refUrl, aspect);
       void refreshCredit();
       return url;

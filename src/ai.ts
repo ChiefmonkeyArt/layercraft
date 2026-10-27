@@ -153,9 +153,9 @@ export async function refund(s: Session, lightningAddress?: string): Promise<{ t
 }
 
 /** One picture from a prompt, optionally with a reference picture. Returns a data URL. */
-export async function generateImage(s: Session, model: string, prompt: string, ref?: string, aspect = '3:4'): Promise<string> {
+export async function generateImage(s: Session, model: string, prompt: string, ref?: string | string[], aspect = '3:4'): Promise<string> {
   const content: any[] = [{ type: 'text', text: prompt }];
-  if (ref) content.push({ type: 'image_url', image_url: { url: ref } });
+  for (const r of (Array.isArray(ref) ? ref : ref ? [ref] : [])) content.push({ type: 'image_url', image_url: { url: r } });
   const j = await json(await timed(`${s.node}/v1/chat/completions`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
     body: JSON.stringify({ model, messages: [{ role: 'user', content }], modalities: ['image', 'text'], image_config: { aspect_ratio: aspect }, stream: false }),
@@ -225,6 +225,52 @@ export const IDEA_PROMPT = (idea: string, o: IdeaOpts) => {
     'No extra elements, watermark or signature.',
   ].join(' ');
 };
+
+const colourLine = (plan: string[]) => `Use exactly these ${plan.length} flat colours and no others, one per level, from the back level to the top level: ${plan.map((c, k) => `${k + 1} ${c} (${colourName(c)})`).join(', ')}. Match the codes as closely as you can; the background stays pure white #ffffff and is not one of the levels.`;
+const FLAT_RULES = [
+  'No shading, gradients within a shape, texture, glow, shadows, reflections or 3D effects: every level is one flat colour.',
+  'Every edge is a crisp, smooth curve or clean straight line, with no specks, noise or jagged edges. Neighbouring colours touch directly; do not outline colour areas with thin lines.',
+  'The smallest detail, gap or line is at least 1/150 of the picture width, so a laser can cut it.',
+  'No extra elements, watermark or signature.',
+].join(' ');
+const tidy = (t: string) => t.trim().replace(/\s+/g, ' ').replace(/[.\s]*$/, '');
+
+/** The Hero: a first drawing from the chat, optionally from an attached reference picture. */
+export const HERO_PROMPT = (idea: string, plan: string[], layers: number, withRef: boolean) => [
+  IDEA_PROMPT(idea, { levels: plan.length, layers, plan }),
+  withRef ? 'The attached picture is a reference from the user: follow its subject, silhouette and composition, redrawn in the flat levels and colours above.' : '',
+].filter(Boolean).join(' ');
+
+/** Change the current Hero drawing (the first attached picture) as the user asks. */
+export const HERO_REFINE_PROMPT = (change: string, plan: string[], withRef: boolean) => [
+  'The first attached picture is artwork for a layered laser-cut wooden piece: flat shapes cut from stacked sheets, one flat colour per sheet.',
+  `Redraw it with this change: ${tidy(change)}.`,
+  'Keep everything else the same: the composition, framing, size and position of every shape, and the plain white background.',
+  `Use exactly ${plan.length} depth levels. ${colourLine(plan)}`,
+  withRef ? 'The second attached picture is a reference from the user for the change.' : '',
+  FLAT_RULES,
+].filter(Boolean).join(' ');
+
+/** The Pop: a complementary design drawn to line up with the Hero (the first attached picture). */
+export const POP_PROMPT = (idea: string, plan: string[], withRef: boolean) => [
+  'The first attached picture is the main design (the Hero) of a layered laser-cut wooden piece.',
+  `Draw a second, complementary design (the Pop) that will be cut on its own sheets and stacked together with the Hero: ${tidy(idea)}.`,
+  'Use exactly the same canvas, framing and scale as the Hero so the two line up when stacked; place the Pop where it complements the Hero (around it, behind it or across it), but draw only the Pop: do not redraw the Hero.',
+  'Everything that is not part of the Pop is pure white #ffffff.',
+  `Build the Pop as exactly ${plan.length} depth levels, from its back to its top; larger shapes further back, finer details on top, each level sitting on the one behind. ${colourLine(plan)}`,
+  withRef ? 'The second attached picture is a reference from the user for the Pop.' : '',
+  FLAT_RULES,
+].filter(Boolean).join(' ');
+
+/** Change the current Pop (first attached picture); the Hero (second) is only for alignment. */
+export const POP_REFINE_PROMPT = (change: string, plan: string[], withRef: boolean) => [
+  'The first attached picture is the Pop: a complementary design for a layered laser-cut wooden piece, drawn to line up with the main design (the second attached picture).',
+  `Redraw the Pop with this change: ${tidy(change)}.`,
+  'Keep the same canvas and framing as before and draw only the Pop, never the main design; everything else is pure white #ffffff.',
+  `Use exactly ${plan.length} depth levels. ${colourLine(plan)}`,
+  withRef ? 'The third attached picture is a reference from the user for the change.' : '',
+  FLAT_RULES,
+].filter(Boolean).join(' ');
 
 // ---------------- picture check (a cheap vision model reads the picture) ----------------
 /** Vision models to try, cheapest good one first. */

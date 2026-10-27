@@ -337,3 +337,58 @@ body:not(.guided) .aibadge { order: 8; }
 .gcutbox { position: relative; line-height: 0; }
 .gcutbox svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .gcutbox svg circle { fill: none; stroke: #00e5ff; stroke-width: 2.5px; vector-effect: non-scaling-stroke; }
+
+/* ---------- Hero and Pop chat ---------- */
+.gstudio { display: flex; flex-direction: column; gap: 10px; }
+.gchat { display: flex; flex-direction: column; gap: 10px; max-height: 46vh; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.gchat:empty { display: none; }
+.gexamples { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.gexamples small { color: var(--muted); font-size: var(--text-xs); }
+.gexamples .gchip { min-width: 0; padding: 7px 12px; font-size: var(--text-sm); color: var(--text); }
+.gmsg { display: flex; flex-direction: column; gap: 6px; max-width: 92%; }
+.gmsg p { margin: 0; font-size: var(--text-sm); line-height: 1.45; }
+.gmsg.you { align-self: flex-end; background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px 12px 3px 12px; padding: 8px 11px; }
+.gmsg.you img { max-width: 120px; border-radius: 6px; }
+.gmsg.ai { align-self: flex-start; }
+.gmsg.ai p { color: var(--muted); }
+.gshot { position: relative; padding: 0; border: 2px solid var(--line); border-radius: 10px; background: #fff; cursor: pointer; width: 190px; overflow: hidden; }
+.gshot img { display: block; width: 100%; height: auto; }
+.gshot .gbadge { position: absolute; left: 6px; top: 6px; background: rgba(17, 16, 14, .82); }
+.gmsg.ai.on .gshot { border-color: var(--accent); }
+.gcompose { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); padding: 10px; }
+.gcompose:focus-within { border-color: #5a4c40; }
+.gcompose textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 64px; background: transparent; border: 0; color: var(--text); font: inherit; font-size: var(--text-base); line-height: 1.45; outline: none; }
+.growbtns { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.growbtns .aibtn { margin-left: auto; }
+.gplus { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); font-size: 1.35rem; line-height: 1; cursor: pointer; flex-shrink: 0; }
+.gplus:hover { border-color: var(--accent); color: var(--accent); }
+.gattach { display: flex; align-items: center; gap: 8px; }
+.gattach img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; }
+.gattach small { color: var(--muted); flex: 1; }
+.gset summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.gset summary .gswatches { flex-shrink: 0; }
+.gset summary .gswatches i { width: 14px; height: 14px; }
+/* ---------- arrange ---------- */
+.garrange { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.garrange li { display: grid; grid-template-columns: 26px auto 1fr auto; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 7px; background: var(--panel-2); font-size: var(--text-sm); }
+.garrange li > b { font-family: var(--font-mono); font-weight: 500; color: var(--muted); font-size: var(--text-xs); text-align: right; }
+.garrange li.popsheet { background: rgba(80, 160, 220, .12); }
+.garrange li.merged { background: rgba(255, 122, 61, .10); }
+.garrange .gsw { display: inline-flex; gap: 3px; }
+.garrange .gsw i { width: 16px; height: 16px; border-radius: 4px; border: 1px solid rgba(255,255,255,.18); }
+.garrange .gsw i.pop { border-radius: 50%; }
+.garrange .gmove { display: flex; gap: 8px; }
+.garrange .gmv { display: inline-flex; align-items: center; gap: 3px; }
+.garrange .gmv small { color: var(--muted); font-size: 0.7rem; }
+.garrange .gmv .btn { padding: 2px 7px; }
+/* ---------- touch up ---------- */
+.gedit { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 18px; background: var(--bg); z-index: 3; }
+.geditcv { max-width: 100%; max-height: 100%; background: #fff; border-radius: 6px; box-shadow: 0 6px 30px rgba(0,0,0,.45); touch-action: none; cursor: crosshair; image-rendering: auto; }
+.glayers { display: flex; flex-wrap: wrap; gap: 8px; }
+.glayer { display: inline-flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px; border-radius: 8px; border: 1px solid transparent; }
+.glayer.on { border-color: var(--accent); background: rgba(255, 122, 61, .12); }
+.glayer small { color: var(--muted); font-size: 0.7rem; font-family: var(--font-mono); }
+.glayer input[type=color] { width: 34px; height: 34px; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: none; cursor: pointer; }
+.gpick { border: 1px solid var(--line); background: var(--panel-2); color: var(--text); border-radius: 6px; font-family: var(--font-mono); font-size: 0.72rem; padding: 1px 8px; cursor: pointer; }
+.glayer.on .gpick { background: var(--accent); border-color: var(--accent); color: #1a0d05; }
+.viewport .gedit canvas.geditcv { position: static; inset: auto; width: auto; height: auto; }
