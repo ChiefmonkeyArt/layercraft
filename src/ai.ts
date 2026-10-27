@@ -233,42 +233,47 @@ const FLAT_RULES = [
   'The smallest detail, gap or line is at least 1/150 of the picture width, so a laser can cut it.',
   'No extra elements, watermark or signature.',
 ].join(' ');
+const ORD = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth'];
+/** n user reference pictures attached after `before` app pictures */
+const refLine = (n: number, before: number, what: string) => !n ? '' : n === 1
+  ? (before ? `The ${ORD[before]} attached picture is a reference from the user ${what}.` : `The attached picture is a reference from the user ${what}.`)
+  : `The ${ORD.slice(before, before + n).join(', ').replace(/, ([^,]*)$/, ' and $1')} attached pictures are references from the user ${what}.`;
 const tidy = (t: string) => t.trim().replace(/\s+/g, ' ').replace(/[.\s]*$/, '');
 
 /** The Hero: a first drawing from the chat, optionally from an attached reference picture. */
-export const HERO_PROMPT = (idea: string, plan: string[], layers: number, withRef: boolean) => [
+export const HERO_PROMPT = (idea: string, plan: string[], layers: number, refs: number) => [
   IDEA_PROMPT(idea, { levels: plan.length, layers, plan }),
-  withRef ? 'The attached picture is a reference from the user: follow its subject, silhouette and composition, redrawn in the flat levels and colours above.' : '',
+  refs ? `${refLine(refs, 0, 'for this design')} Follow ${refs > 1 ? 'their' : 'its'} subject, silhouette and composition, redrawn in the flat levels and colours above.` : '',
 ].filter(Boolean).join(' ');
 
 /** Change the current Hero drawing (the first attached picture) as the user asks. */
-export const HERO_REFINE_PROMPT = (change: string, plan: string[], withRef: boolean) => [
+export const HERO_REFINE_PROMPT = (change: string, plan: string[], refs: number) => [
   'The first attached picture is artwork for a layered laser-cut wooden piece: flat shapes cut from stacked sheets, one flat colour per sheet.',
   `Redraw it with this change: ${tidy(change)}.`,
   'Keep everything else the same: the composition, framing, size and position of every shape, and the plain white background.',
   `Use exactly ${plan.length} depth levels. ${colourLine(plan)}`,
-  withRef ? 'The second attached picture is a reference from the user for the change.' : '',
+  refLine(refs, 1, 'for the change'),
   FLAT_RULES,
 ].filter(Boolean).join(' ');
 
 /** The Pop: a complementary design drawn to line up with the Hero (the first attached picture). */
-export const POP_PROMPT = (idea: string, plan: string[], withRef: boolean) => [
+export const POP_PROMPT = (idea: string, plan: string[], refs: number) => [
   'The first attached picture is the main design (the Hero) of a layered laser-cut wooden piece.',
   `Draw a second, complementary design (the Pop) that will be cut on its own sheets and stacked together with the Hero: ${tidy(idea)}.`,
   'Use exactly the same canvas, framing and scale as the Hero so the two line up when stacked; place the Pop where it complements the Hero (around it, behind it or across it), but draw only the Pop: do not redraw the Hero.',
   'Everything that is not part of the Pop is pure white #ffffff.',
   `Build the Pop as exactly ${plan.length} depth levels, from its back to its top; larger shapes further back, finer details on top, each level sitting on the one behind. ${colourLine(plan)}`,
-  withRef ? 'The second attached picture is a reference from the user for the Pop.' : '',
+  refLine(refs, 1, 'for the Pop'),
   FLAT_RULES,
 ].filter(Boolean).join(' ');
 
 /** Change the current Pop (first attached picture); the Hero (second) is only for alignment. */
-export const POP_REFINE_PROMPT = (change: string, plan: string[], withRef: boolean) => [
+export const POP_REFINE_PROMPT = (change: string, plan: string[], refs: number) => [
   'The first attached picture is the Pop: a complementary design for a layered laser-cut wooden piece, drawn to line up with the main design (the second attached picture).',
   `Redraw the Pop with this change: ${tidy(change)}.`,
   'Keep the same canvas and framing as before and draw only the Pop, never the main design; everything else is pure white #ffffff.',
   `Use exactly ${plan.length} depth levels. ${colourLine(plan)}`,
-  withRef ? 'The third attached picture is a reference from the user for the change.' : '',
+  refLine(refs, 2, 'for the change'),
   FLAT_RULES,
 ].filter(Boolean).join(' ');
 

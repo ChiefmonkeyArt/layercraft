@@ -397,3 +397,21 @@ body.guided.gnohero .gblank { display: flex; position: absolute; inset: 0; flex-
 body.guided.gnohero .gblank b { color: var(--text); font-family: var(--font-display); font-size: 1.2rem; }
 body.guided.gnohero .gblank span { max-width: 34ch; font-size: var(--text-sm); }
 body.guided.gnohero .toolbar, body.guided.gnohero footer.status { visibility: hidden; }
+@media (max-width: 860px) {
+  body.guided.gnohero .body { grid-template-rows: auto minmax(0, 1fr); }
+  body.guided.gnohero #viewport, body.guided.gnohero .toolbar, body.guided.gnohero footer.status { display: none; }
+}
+@media (max-width: 860px) {
+  body.guided footer.status .warn { display: none; }
+  body.guided footer.status .stats { white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
+  body.guided .toolbar { display: none; }
+  .gshot { width: 130px; }
+  .gedit { padding: 8px; }
+  #gpanel .gfield .gchip { padding: 7px 11px; }
+}
+.gthumbs { display: flex; gap: 4px; flex-wrap: wrap; }
+.gmsg.you .gthumbs img { max-width: 72px; max-height: 72px; object-fit: cover; }
+.gattach { flex-wrap: wrap; }
+.gatt { position: relative; display: inline-flex; }
+.gatt .gpdel { position: absolute; top: -8px; right: -8px; width: 22px; height: 22px; font-size: 0.95rem; background: var(--panel); border: 1px solid var(--line); border-radius: 50%; color: var(--text); }
+.gplus:disabled { opacity: .4; cursor: not-allowed; }

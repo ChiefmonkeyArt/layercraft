@@ -500,7 +500,7 @@ export function createGuided(api: GuidedApi) {
     document.body.classList.toggle('gnohero', blank);
     const vp = document.getElementById('viewport');
     if (vp && !vp.querySelector('.gblank')) vp.append(h('div', { class: 'gblank' }, h('b', {}, 'Your design appears here'),
-      h('span', {}, 'Describe it on the left and press Create. You can see every layer stacked as you go.')));
+      h('span', {}, 'Describe it and press Create. You see every layer stacked as you go.')));
   }
   function go(to: number | string) {
     let i = typeof to === 'string' ? idx(to) : to;

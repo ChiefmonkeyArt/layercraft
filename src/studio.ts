@@ -10,7 +10,7 @@ import { nearestAspect } from './aiui';
 import { hexRgb as hexToRgb } from './trace';
 
 export interface Shot { src: string; plan: string[]; report: CutReport; w: number; h: number }
-export interface Msg { you: boolean; text: string; img?: string; shot?: number }
+export interface Msg { you: boolean; text: string; img?: string; imgs?: string[]; shot?: number }
 export interface Part { chat: Msg[]; shots: Shot[]; pick: number; layers: number; ramp: string; mine: boolean; colours: string; draft: string }
 export interface Art { v: 1; hero: Part; pop: Part; place: PopPlace[]; noPop?: boolean; name?: string; frame?: boolean }
 export type Which = 'hero' | 'pop';
@@ -52,7 +52,8 @@ async function shrink(src: string, long: number, type = 'image/png') {
 export function createStudio(x: StudioCtx) {
   const { api, h } = x;
   let art: Art = valid(api.art()) ?? newArt();
-  const attach: Record<Which, string> = { hero: '', pop: '' };
+  const MAX_ATTACH = 3;
+  const attach: Record<Which, string[]> = { hero: [], pop: [] };
   let rebuildTimer = 0;
   function valid(a: unknown): Art | null {
     const o = a as Art;
@@ -106,10 +107,10 @@ export function createStudio(x: StudioCtx) {
     const plan = planOf(p);
     let prompt: string, refs: string[];
     if (which === 'hero') {
-      if (cur) { prompt = HERO_REFINE_PROMPT(text, plan, !!ref); refs = [cur.src, ...(ref ? [ref] : [])]; }
-      else { prompt = HERO_PROMPT(text, plan, p.layers, !!ref); refs = ref ? [ref] : []; }
-    } else if (cur) { prompt = POP_REFINE_PROMPT(text, plan, !!ref); refs = [cur.src, H!.src, ...(ref ? [ref] : [])]; }
-    else { prompt = POP_PROMPT(text, plan, !!ref); refs = [H!.src, ...(ref ? [ref] : [])]; }
+      if (cur) { prompt = HERO_REFINE_PROMPT(text, plan, ref.length); refs = [cur.src, ...ref]; }
+      else { prompt = HERO_PROMPT(text, plan, p.layers, ref.length); refs = [...ref]; }
+    } else if (cur) { prompt = POP_REFINE_PROMPT(text, plan, ref.length); refs = [cur.src, H!.src, ...ref]; }
+    else { prompt = POP_PROMPT(text, plan, ref.length); refs = [H!.src, ...ref]; }
     const aspect = H ? nearestAspect(H.w, H.h) : '3:4';
     const url = await api.ai.create(prompt, refs.length ? refs : undefined, aspect, () => x.busy(which === 'hero' ? (cur ? 'Changing your Hero…' : 'Drawing your Hero…') : (cur ? 'Changing the Pop…' : 'Drawing the Pop…')));
     if (!url) { x.busy(''); x.draw(); return; } // no credit, or the AI failed (it said why); the message stays in the box
@@ -119,8 +120,9 @@ export function createStudio(x: StudioCtx) {
       art = { ...art, name: text.split(/\s+/).slice(0, 4).join(' ').replace(/[^\p{L}\p{N} '-]/gu, '').slice(0, 40) || 'AI design' };
       api.setName(art.name!.charAt(0).toUpperCase() + art.name!.slice(1));
     }
-    p.chat.push({ you: true, text: text.trim(), img: ref ? await shrink(ref, 240, 'image/jpeg') : undefined });
-    p.draft = ''; attach[which] = '';
+    const imgs = await Promise.all(ref.map((r) => shrink(r, 240, 'image/jpeg')));
+    p.chat.push({ you: true, text: text.trim(), img: imgs[0], imgs: imgs.length > 1 ? imgs : undefined });
+    p.draft = ''; attach[which] = [];
     await addShot(which, url, plan);
   }
   async function addShot(which: Which, url: string, plan: string[]) {
@@ -149,14 +151,16 @@ export function createStudio(x: StudioCtx) {
   }
 
   // ---------- the chat panel ----------
-  const fileIn = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp', hidden: true }) as HTMLInputElement;
+  const fileIn = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp', multiple: true, hidden: true }) as HTMLInputElement;
   let fileFor: Which = 'hero';
   fileIn.addEventListener('change', async () => {
-    const f = fileIn.files?.[0]; fileIn.value = '';
-    if (!f) return;
-    if (f.size > 30e6) { api.toast('That picture is over 30 MB'); return; }
-    const url = await new Promise<string>((res) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.readAsDataURL(f); });
-    try { attach[fileFor] = await shrink(url, 1600, 'image/jpeg'); } catch { api.toast('Could not read that picture'); return; }
+    const fs = [...(fileIn.files ?? [])]; fileIn.value = '';
+    for (const f of fs) {
+      if (attach[fileFor].length >= MAX_ATTACH) { api.toast(`Up to ${MAX_ATTACH} pictures per message`); break; }
+      if (f.size > 30e6) { api.toast('That picture is over 30 MB'); continue; }
+      const url = await new Promise<string>((res) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.readAsDataURL(f); });
+      try { attach[fileFor].push(await shrink(url, 1600, 'image/jpeg')); } catch { api.toast('Could not read that picture'); }
+    }
     x.draw();
   });
   const EXAMPLES: Record<Which, string[]> = {
@@ -172,7 +176,7 @@ export function createStudio(x: StudioCtx) {
       log.append(ex);
     }
     p.chat.forEach((m, i) => {
-      if (m.you) { log.append(h('div', { class: 'gmsg you' }, m.img ? h('img', { src: m.img, alt: 'Your attached picture' }) : null, h('p', {}, m.text))); return; }
+      if (m.you) { const im = m.imgs ?? (m.img ? [m.img] : []); log.append(h('div', { class: 'gmsg you' }, im.length ? h('div', { class: 'gthumbs' }, ...im.map((src) => h('img', { src, alt: 'Your attached picture' }))) : null, h('p', {}, m.text))); return; }
       const s = m.shot != null ? p.shots[m.shot] : null, on = m.shot === p.pick;
       log.append(h('div', { class: 'gmsg ai' + (on ? ' on' : '') },
         s?.src ? h('button', { class: 'gshot', 'aria-label': on ? 'This version is in use' : 'Use this version', 'aria-pressed': on ? 'true' : 'false',
@@ -187,9 +191,11 @@ export function createStudio(x: StudioCtx) {
     ta.addEventListener('input', () => { p.draft = ta.value; });
     ta.addEventListener('change', save);
     ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendBtn.click(); } });
-    const plus = h('button', { class: 'gplus', 'aria-label': 'Attach a picture', title: 'Attach a picture', onclick: () => { fileFor = which; fileIn.click(); } }, '+');
-    const chip = attach[which] ? h('div', { class: 'gattach' }, h('img', { src: attach[which], alt: 'Picture to send' }), h('small', {}, 'Attached'),
-      h('button', { class: 'gpdel', 'aria-label': 'Remove the attached picture', onclick: () => { attach[which] = ''; x.draw(); } }, '×')) : null;
+    const full = attach[which].length >= MAX_ATTACH;
+    const plus = h('button', { class: 'gplus', 'aria-label': 'Attach pictures', title: full ? `Up to ${MAX_ATTACH} pictures per message` : 'Attach pictures', disabled: full, onclick: () => { fileFor = which; fileIn.click(); } }, '+');
+    const chip = attach[which].length ? h('div', { class: 'gattach' }, ...attach[which].map((src, k) => h('span', { class: 'gatt' }, h('img', { src, alt: `Picture ${k + 1} to send` }),
+      h('button', { class: 'gpdel', 'aria-label': `Remove picture ${k + 1}`, onclick: () => { attach[which].splice(k, 1); x.draw(); } }, '×'))),
+      h('small', {}, attach[which].length === 1 ? 'Attached' : `${attach[which].length} attached`)) : null;
     const sendBtn = x.aiButton(cur ? 'Send change' : which === 'hero' ? 'Create' : 'Create the Pop', () => send(which, ta.value));
     const plan = planOf(p);
     const sw = h('div', { class: 'gswatches', 'aria-label': 'Colours, back sheet first' });
@@ -279,18 +285,20 @@ export function createStudio(x: StudioCtx) {
     };
     const dab = (x: number, y: number) => {
       const L = ed.L[ed.target.which]; if (!L) return;
-      const r = R(), v = ed.tool === 'erase' ? -1 : ed.target.k;
-      stamp(L, v, (X, Y) => (X - x) ** 2 + (Y - y) ** 2 <= r * r, x - r, y - r, x + r, y + r);
+      const r = R(), v = ed.tool === 'erase' ? -1 : ed.target.k, w = ed.w;
+      // the move brush only changes shapes already there; it never adds material
+      const inside = (X: number, Y: number) => (X - x) ** 2 + (Y - y) ** 2 <= r * r;
+      stamp(L, v, ed.tool === 'fill' ? (X, Y) => inside(X, Y) && L[Y * w + X] >= 0 : inside, x - r, y - r, x + r, y + r);
     };
-    let last: [number, number] | null = null;
+    let last: [number, number] | null = null, moved = false;
     cv.addEventListener('pointerdown', (e) => {
       cv.setPointerCapture(e.pointerId); down = true; const p = at(e); before = snap();
-      if (ed.tool === 'fill') { fillAt(p[0], p[1]); down = false; push(before); drawEditor(); return; }
-      start = p; last = p; if (ed.tool === 'brush' || ed.tool === 'erase') { dab(p[0], p[1]); drawEditor(); }
+      start = p; last = p; moved = false; if (ed.tool === 'brush' || ed.tool === 'erase') { dab(p[0], p[1]); drawEditor(); }
     });
     cv.addEventListener('pointermove', (e) => {
       if (!down) return; const p = at(e);
-      if (ed.tool === 'brush' || ed.tool === 'erase') {
+      if (ed.tool === 'fill' && !moved) { if (Math.hypot(p[0] - start![0], p[1] - start![1]) < R() * 0.6) return; moved = true; dab(start![0], start![1]); }
+      if (ed.tool === 'brush' || ed.tool === 'erase' || ed.tool === 'fill') {
         const d = Math.hypot(p[0] - last![0], p[1] - last![1]), st = Math.max(1, R() / 3);
         for (let t = st; t <= d; t += st) dab(last![0] + (p[0] - last![0]) * t / d, last![1] + (p[1] - last![1]) * t / d);
         dab(p[0], p[1]); last = p; drawEditor();
@@ -304,7 +312,8 @@ export function createStudio(x: StudioCtx) {
         drawEditor();
       }
     });
-    const up = () => { if (!down) return; down = false; if (before) push(before); before = null; start = null; };
+    const up = () => { if (!down) return; down = false;
+      if (ed.tool === 'fill' && !moved && start) { fillAt(start[0], start[1]); drawEditor(); } if (before) push(before); before = null; start = null; x.draw(); };
     cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
     drawEditor(); x.draw();
   }
@@ -362,7 +371,7 @@ export function createStudio(x: StudioCtx) {
       ed.on ? h('div', { class: 'gfield' },
         x.chips<Tool>('Tool', tools, () => ed.tool, (v) => { ed.tool = v; x.draw(); }),
         x.chips<number>('Size', [[10, 'Fine'], [24, 'Medium'], [50, 'Bold']], () => ed.size, (v) => { ed.size = v; }),
-        h('p', { class: 'note' }, ed.tool === 'fill' ? 'Tap a shape to move it onto the chosen layer: it takes that layer’s colour and depth.' : `Drawing on ${ed.target.which === 'hero' ? 'Hero' : 'Pop'} ${ed.target.k + 1}. Pick a layer number above to change it. Everything you draw stands on the layers below it.`),
+        h('p', { class: 'note' }, ed.tool === 'fill' ? 'Tap a shape to move all of it onto the chosen layer, or brush over part of it to move just that part. It takes that layer’s colour and depth.' : `Drawing on ${ed.target.which === 'hero' ? 'Hero' : 'Pop'} ${ed.target.k + 1}. Pick a layer number above to change it. Everything you draw stands on the layers below it.`),
         h('div', { class: 'gbtns' },
           h('button', { class: 'btn primary', onclick: () => void closeEditor(true) }, 'Done'),
           h('button', { class: 'btn small', disabled: !ed.undo.length, onclick: () => { const b = ed.undo.pop(); if (b) { ed.L.hero = b.hero; ed.L.pop = b.pop; drawEditor(); x.draw(); } } }, 'Undo'),
@@ -376,7 +385,7 @@ export function createStudio(x: StudioCtx) {
     get art() { return art; },
     touchUp, editing: () => ed.on, closeEditor,
     reload() { art = valid(api.art()) ?? newArt(); },
-    reset() { art = newArt(); attach.hero = attach.pop = ''; },
+    reset() { art = newArt(); attach.hero = []; attach.pop = []; },
     shot, hasPop, chat, arrange, rebuild,
     skipPop() { art.noPop = true; save(); void rebuild(); },
     popRamp() { if (!art.pop.chat.length) { art.pop.ramp = POP_RAMP[art.hero.ramp] ?? 'ocean'; } },
