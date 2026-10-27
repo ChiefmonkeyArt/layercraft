@@ -28,6 +28,7 @@ export interface TraceOpts {
   raise?: 'centre' | 'edge'; // shapes: the middle stands highest (default) or the outside does
   levels?: number;           // shapes / map: at most this many sheets, back included
   depthMap?: TraceImage;     // map: a grey layer map of the same area, lighter = higher
+  mapLevels?: number;        // map: made by the app, exactly this many evenly spaced greys (no guessing, no reordering)
   clean?: boolean;           // a photo or a layer map: smooth noisy edges into clean curves (gaps still kept)
   mapKind?: 'flat' | 'photo'; // flat greys (AI layer map) or smooth depth read from a photo
   learn?: SitExample[];      // corrections from other pictures (the learning engine)
@@ -736,7 +737,11 @@ export function trace(img: TraceImage, o: TraceOpts, progress?: (msg: string) =>
     progress?.('Finding the layers…');
     const fixes = (o.fixes ?? []).map((f) => ({ i: Math.min(h - 1, Math.max(0, Math.floor(f.v * h))) * w + Math.min(w - 1, Math.max(0, Math.floor(f.u * w))), a: f.a }));
     let r: { D: Int32Array; n: number; fixFeat?: (number[] | null)[] } | null = null;
-    if (o.depth === 'map' && o.depthMap && (o.mapKind ?? 'flat') === 'flat') {
+    if (o.depth === 'map' && o.depthMap && o.mapLevels && o.mapLevels >= 2) {
+      // the app's own height map (Hero and Pop combined): every grey is a known sheet, top first
+      const fm = flatMapDepth(o.depthMap, inside, w, h, minPx0, undefined, mapGreys(o.mapLevels).slice().reverse());
+      if (fm) r = { D: fm.D, n: fm.n };
+    } else if (o.depth === 'map' && o.depthMap && (o.mapKind ?? 'flat') === 'flat') {
       // an AI layer map: trust its regions (which pixels are one physical sheet), not the order of
       // its greys (image models drift towards the picture's own brightness). Order the regions by
       // how they nest, like the shapes, with the same learning.
@@ -1286,7 +1291,7 @@ export interface RedrawHints { inks: { hex: string; name: string; role: string }
  * A crisp AI layer map: each flat grey is one sheet. The map's own pixels are grouped by grey
  * (0..255, so close greys stay apart); in-between greys at anti-aliased edges take a neighbour's.
  */
-function flatMapDepth(map: TraceImage, inside: Mask, w: number, h: number, minPx: number, levels?: number): { D: Int32Array; n: number; centres: number[] } | null {
+function flatMapDepth(map: TraceImage, inside: Mask, w: number, h: number, minPx: number, levels?: number, exact?: number[]): { D: Int32Array; n: number; centres: number[] } | null {
   const N = w * h, G = new Uint8Array(N), hist = new Float64Array(256);
   let nin = 0;
   for (let i = 0; i < N; i++) {
@@ -1301,6 +1306,7 @@ function flatMapDepth(map: TraceImage, inside: Mask, w: number, h: number, minPx
   let centres: number[] = [];
   for (const k of pk) if (centres.every((q) => Math.abs(q - k) >= 6)) centres.push(k);
   if (levels && levels >= 2 && centres.length > levels) centres = centres.slice(0, levels);
+  if (exact) centres = exact.slice();
   centres.sort((a, b) => b - a); // lightest (top) first
   if (centres.length < 2) return null;
   const D = new Int32Array(N).fill(centres.length - 1), known = new Uint8Array(N);
@@ -1325,6 +1331,9 @@ function flatMapDepth(map: TraceImage, inside: Mask, w: number, h: number, minPx
   for (let i = 0; i < N; i++) if (!inside[i]) D[i] = keepOut[i];
   return { D, n: centres.length, centres };
 }
+
+/** The greys of an app-made height map, back sheet first (lighter = higher). */
+export const mapGreys = (n: number) => Array.from({ length: n }, (_, s) => Math.round(255 * (s + 1) / n));
 
 /** Ask the image model for a layer map: one flat grey per physical sheet, lighter = higher. */
 export const LAYER_MAP_PROMPT = (layers: number, c?: RedrawHints | null) => [

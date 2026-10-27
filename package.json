@@ -5,7 +5,8 @@
   "scripts": {
     "test": "tsx tests/run.ts",
     "test:trace": "tsx tests/run.ts",
-    "bake-lessons": "tsx scripts/bake-lessons.ts"
+    "bake-lessons": "tsx scripts/bake-lessons.ts",
+    "test:compose": "tsx tests/compose-synth.ts"
   },
   "keywords": [],
   "author": "",
