@@ -392,3 +392,8 @@ body:not(.guided) .aibadge { order: 8; }
 .gpick { border: 1px solid var(--line); background: var(--panel-2); color: var(--text); border-radius: 6px; font-family: var(--font-mono); font-size: 0.72rem; padding: 1px 8px; cursor: pointer; }
 .glayer.on .gpick { background: var(--accent); border-color: var(--accent); color: #1a0d05; }
 .viewport .gedit canvas.geditcv { position: static; inset: auto; width: auto; height: auto; }
+.gblank { display: none; }
+body.guided.gnohero .gblank { display: flex; position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: center; gap: 8px; text-align: center; padding: 24px; color: var(--muted); z-index: 2; background: var(--bg); }
+body.guided.gnohero .gblank b { color: var(--text); font-family: var(--font-display); font-size: 1.2rem; }
+body.guided.gnohero .gblank span { max-width: 34ch; font-size: var(--text-sm); }
+body.guided.gnohero .toolbar, body.guided.gnohero footer.status { visibility: hidden; }

@@ -496,6 +496,11 @@ export function createGuided(api: GuidedApi) {
     const log = content.querySelector('.gchat');
     if (log && atEnd) log.scrollTop = log.scrollHeight;
     drawBar(); drawNav();
+    const blank = s.id === 'hero' && !studio.shot('hero');
+    document.body.classList.toggle('gnohero', blank);
+    const vp = document.getElementById('viewport');
+    if (vp && !vp.querySelector('.gblank')) vp.append(h('div', { class: 'gblank' }, h('b', {}, 'Your design appears here'),
+      h('span', {}, 'Describe it on the left and press Create. You can see every layer stacked as you go.')));
   }
   function go(to: number | string) {
     let i = typeof to === 'string' ? idx(to) : to;
