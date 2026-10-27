@@ -151,6 +151,7 @@ export function createStudio(x: StudioCtx) {
     if (which === 'pop') art.noPop = false;
     x.busy('Building the stack…');
     await rebuild();
+    x.draw(); // the stage starts its trace once the panel is redrawn
     await api.settled();
     x.busy(''); x.draw();
   }

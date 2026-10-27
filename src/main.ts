@@ -1129,7 +1129,7 @@ function renderStatus() {
   if (result.details?.length) st.innerHTML += `<div class="details">Details: ${result.details.map((d) => `layer ${d.layer} — ${d.motifs.map(nm).join(', ')}`).join(' · ')}</div>`;
   if (result.backend === 'js') st.innerHTML += `<div class="details">This device blocks the fast geometry engine (iPhone Lockdown Mode does this), so edits are slower. Excluding this app or site from Lockdown Mode makes it many times faster.</div>`;
   if (!result.details?.length && S.detailMode !== 'off' && S.repeat !== 'trace') st.innerHTML += `<div class="details">No detail layers in this stack — try a lower “First detail at layer” or wider spacing.</div>`;
-  w.innerHTML = result.warnings.map((x) => `<div>${x}</div>`).join('');
+  w.replaceChildren(...result.warnings.map((x) => { const d = document.createElement('div'); d.textContent = String(x); return d; }));
 }
 
 let flatView = false; // stack view without shadows, to compare with the picture
@@ -1338,8 +1338,24 @@ function showView(v: typeof view) {
 }
 document.querySelectorAll<HTMLButtonElement>('.tabs [data-v]').forEach((b) => b.addEventListener('click', () => showView(b.dataset.v as any)));
 
+/** Only known settings, each with the same type as its default, are taken from an opened or saved project. */
+function cleanSettings(x: any): Partial<typeof S> {
+  const out: any = {};
+  if (!x || typeof x !== 'object') return out;
+  const optional: Record<string, unknown> = { traceGaps: '', traceFont: '', traceFollow: false, traceLayers: 0, traceDepth: '', traceStepMm: 0, traceColourMode: '', traceDepthBy: '', traceRaise: '' };
+  for (const k of new Set([...Object.keys(S), ...Object.keys(optional)])) {
+    const v = x[k], cur = k in S && (S as any)[k] !== undefined ? (S as any)[k] : optional[k];
+    if (v === undefined) continue;
+    if (typeof cur === 'number') { if (typeof v === 'number' && Number.isFinite(v)) out[k] = v; }
+    else if (typeof cur === 'boolean') { if (typeof v === 'boolean') out[k] = v; }
+    else if (typeof cur === 'string') { if (typeof v === 'string' && v.length < 200) out[k] = v; }
+    else if (Array.isArray(cur)) { if (Array.isArray(v) && v.every((e) => ['number', 'string', 'boolean'].includes(typeof e))) out[k] = v; }
+    else if (cur === null || typeof cur === 'object') { if (v === null || typeof v === 'object') out[k] = v; }
+  }
+  return out;
+}
 function applyProject(d: any) {
-    Object.assign(S, { detailMode: 'off', repeat: 'centre', corners: false, traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false, traceFont: '', traceDepthBy: 'colour', traceLayers: 0 }, d.settings); // older projects had no detail layers or Free mode
+    Object.assign(S, { detailMode: 'off', repeat: 'centre', corners: false, traceColours: 12, traceSmooth: 0.6, traceMinPiece: 25, traceDarkFirst: true, traceFollow: false, traceFont: '', traceDepthBy: 'colour', traceLayers: 0 }, cleanSettings(d.settings)); // older projects had no detail layers or Free mode
     free = d.free ?? emptyFree(); freeUndo.length = 0;
     colourway = d.colourway ?? 'natural';
     if (d.colours) { CUSTOM.top = d.colours.top ?? CUSTOM.top; CUSTOM.bottom = d.colours.bottom ?? CUSTOM.bottom; CUSTOM.sheet = { ...(d.colours.sheet ?? d.colours.detail ?? {}) }; }
@@ -1545,9 +1561,13 @@ guided = createGuided({
   },
   /** Resolves once the stage shows the latest design (trace and render done), or after a minute. */
   settled: async () => {
-    const t0 = performance.now();
-    await new Promise((z) => setTimeout(z, 200));
-    while (performance.now() - t0 < 60000 && (traceBusy || pending || !traceFresh() || $('#busy').classList.contains('on'))) await new Promise((z) => setTimeout(z, 150));
+    // the stage's own busy light covers tracing and building; wait until it has been off for a moment
+    const t0 = performance.now(); let calm = 0;
+    await new Promise((z) => setTimeout(z, 300));
+    while (performance.now() - t0 < 90000 && calm < 3) {
+      calm = $('#busy').classList.contains('on') ? 0 : calm + 1;
+      await new Promise((z) => setTimeout(z, 150));
+    }
   },
   setName: (n: string) => { projectName = n; $<HTMLInputElement>('#pname').value = n; },
   hasPicture: () => !!traceSrc && S.repeat === 'trace',
