@@ -10,9 +10,17 @@ import type { CutReport } from './cutready';
 import { createStudio } from './studio';
 
 /** localStorage that never throws (sandboxed frames and private modes can block it). */
+const mem = new Map<string, string>();
+let lsOk: boolean | null = null;
+/** Can this window keep data after the tab closes? Embedded frames with third-party storage blocked cannot. */
+export function storageOk(): boolean {
+  if (lsOk == null) { try { const k = '__lc_probe'; window.localStorage.setItem(k, '1'); lsOk = window.localStorage.getItem(k) === '1'; window.localStorage.removeItem(k); } catch { lsOk = false; } }
+  return lsOk;
+}
+/** localStorage that never throws, and falls back to memory for this tab when storage is blocked. */
 export const store = {
-  get(k: string): string | null { try { return window.localStorage.getItem(k); } catch { return null; } },
-  set(k: string, v: string) { try { window.localStorage.setItem(k, v); } catch { /* not available here */ } },
+  get(k: string): string | null { if (storageOk()) { try { return window.localStorage.getItem(k); } catch { /* fall through */ } } return mem.has(k) ? mem.get(k)! : null; },
+  set(k: string, v: string) { mem.set(k, v); if (storageOk()) { try { window.localStorage.setItem(k, v); } catch { /* memory only */ } } },
 };
 
 type View = 'stack' | '3d' | 'layers' | 'sketch';

@@ -131,6 +131,38 @@ export async function createInvoice(node: string, sats: number, topupKey?: strin
 export async function invoiceStatus(node: string, id: string): Promise<{ status: string; api_key: string | null }> {
   return json(await timed(`${node}/lightning/invoice/${encodeURIComponent(id)}/status`, {}, 8000));
 }
+/** Routstr: a paid invoice (its bolt11) proves ownership and returns the key it opened or topped up. */
+export async function recoverInvoice(node: string, bolt11: string): Promise<{ status: string; api_key: string | null; amount_sats?: number }> {
+  return json(await timed(`${node}/lightning/recover`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ bolt11: bolt11.trim().replace(/^lightning:/i, '') }) }, 12000));
+}
+/** Every node we know of: the ones paid before first, then announced and built-in ones. */
+export async function knownNodes(first: string[] = []): Promise<{ url: string; name: string }[]> {
+  let ann: { url: string; name: string }[] = [];
+  try { ann = await nostrNodes(); } catch { /* relays unreachable */ }
+  const names = new Map(ann.map((n) => [n.url, n.name]));
+  return [...new Set([...first, ...ann.map((n) => n.url), ...BOOTSTRAP])].slice(0, 40).map((url) => ({ url, name: names.get(url) || new URL(url).hostname }));
+}
+/** Find which node issued a paid invoice and get its key. */
+export async function findPayment(bolt11: string, first: string[] = []): Promise<{ node: string; name: string; key: string | null; status: string; sats?: number } | null> {
+  const nodes = await knownNodes(first);
+  return new Promise((res) => {
+    let left = nodes.length, done = false;
+    if (!left) res(null);
+    for (const n of nodes) void recoverInvoice(n.url, bolt11).then((r) => {
+      if (!done) { done = true; res({ node: n.url, name: n.name, key: r.api_key, status: r.status, sats: r.amount_sats }); }
+    }).catch(() => undefined).finally(() => { if (--left === 0 && !done) res(null); });
+  });
+}
+
+// ---------------- payment log: written before the user pays, so a paid invoice is never lost ----------------
+export interface Payment { node: string; name: string; bolt11: string; id: string; sats: number; at: number; topup: boolean; status: 'pending' | 'paid' | 'expired' | 'refunded'; key?: string }
+const LS_PAY = 'lc.ai.payments';
+export function payments(): Payment[] { try { const a = JSON.parse(store.get(LS_PAY) || '[]'); return Array.isArray(a) ? a : []; } catch { return []; } }
+export function savePayment(p: Payment) {
+  const a = payments().filter((x) => x.id !== p.id);
+  a.unshift(p); store.set(LS_PAY, JSON.stringify(a.slice(0, 40)));
+}
+
 export async function redeemCashu(node: string, token: string): Promise<string> {
   const t = token.replace(/\s+/g, '');
   if (!/^cashu[AB]/.test(t)) throw new Error('That does not look like a Cashu token (it starts with cashuA or cashuB)');

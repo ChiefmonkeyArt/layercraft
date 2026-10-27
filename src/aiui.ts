@@ -2,10 +2,10 @@
 import QRCode from 'qrcode';
 import {
   FLAT_MODEL, MODELS, newerModels, NodeOffer, Session, balance, btcUsd, createInvoice, findOffers, fmtSats, fmtUsd, generateImage, getSession,
-  invoiceStatus, parseSessionCode, redeemCashu, refund, sessionCode, setSession, shrinkForUpload, topupCashu,
+  invoiceStatus, findPayment, payments, savePayment, Payment, parseSessionCode, redeemCashu, refund, sessionCode, setSession, shrinkForUpload, topupCashu,
   checkPicture, visionOffer, type PictureCheck,
 } from './ai';
-import { store } from './guided';
+import { store, storageOk } from './guided';
 import { hasSigner, pullSession, pushSession } from './nostrsync';
 
 type H = (tag: string, attrs?: Record<string, any>, ...kids: (Node | string | null | undefined)[]) => HTMLElement;
@@ -87,6 +87,7 @@ export function createAiUi(h: H, toast: (m: string) => void) {
     if (!topup) await loadOffers();
     body.innerHTML = '';
     const s = getSession();
+    if (!storageOk()) body.append(storageWarn(null));
     if (!topup) {
       body.append(h('p', { class: 'glead' }, 'Pay as you go with Bitcoin. Add a little credit, use it for AI pictures, and get back what you don\'t use.'));
       body.append(h('div', { class: 'glab' }, 'Model'), chipRow(MODELS.map((m) => [m.id, m.label, m.note]), model, (v) => { model = v; store.set('lc.ai.model', v); void viewBuy(); }));
@@ -121,7 +122,8 @@ export function createAiUi(h: H, toast: (m: string) => void) {
           await balance(ss); setSession(ss); store.set('lc.ai.synced', '1'); await refreshCredit(); viewSession(); toast('Session restored from Nostr');
         } catch (e: any) { toast(e?.status ? 'That session has ended on its node' : `Nostr: ${e.message}`); }
       } }, 'Restore from Nostr'));
-      body.append(restore);
+      body.append(restore, recoverBox());
+      if (payments().length) body.append(history());
     } else body.append(h('button', { class: 'btn small ghost', onclick: () => viewSession() }, 'Back'));
     body.append(privacy());
   }
@@ -131,6 +133,8 @@ export function createAiUi(h: H, toast: (m: string) => void) {
     body.append(h('p', { class: 'aistate' }, 'Asking the node for an invoice…'));
     let inv;
     try { inv = await createInvoice(node, sats, topupKey); } catch (e: any) { body.innerHTML = ''; body.append(h('p', { class: 'aistate warn' }, `The node could not make an invoice: ${e.message}`), h('button', { class: 'btn', onclick: () => void viewBuy(!!topupKey) }, 'Back')); return; }
+    const pay: Payment = { node, name: offer?.name ?? getSession()?.name ?? new URL(node).hostname, bolt11: inv.bolt11, id: inv.invoice_id, sats: inv.amount_sats, at: Date.now(), topup: !!topupKey, status: 'pending' };
+    savePayment(pay); // kept before payment: if anything goes wrong the invoice can still be recovered
     const uri = `lightning:${inv.bolt11.toUpperCase()}`;
     const cv = h('canvas', { class: 'aiqr', 'aria-label': 'Lightning invoice QR code' }) as HTMLCanvasElement;
     try { await QRCode.toCanvas(cv, uri, { margin: 2, width: 260, errorCorrectionLevel: 'M', color: { dark: '#000000', light: '#ffffff' } }); } catch { /* text fallback below */ }
@@ -147,15 +151,16 @@ export function createAiUi(h: H, toast: (m: string) => void) {
       if (busy) return; busy = true;
       try {
         const left = inv!.expires_at - Date.now() / 1000;
-        if (left <= 0) { clearInterval(poll); st.textContent = 'This invoice expired. Make a new one.'; return; }
+        if (left <= 0) { clearInterval(poll); st.textContent = 'This invoice expired. Make a new one.'; savePayment({ ...pay, status: 'expired' }); return; }
         const r = await invoiceStatus(node, inv!.invoice_id);
         st.textContent = `Waiting for payment… expires in ${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, '0')}`;
         if (r.status === 'paid') {
           clearInterval(poll);
           if (!topupKey) {
             if (!r.api_key) { st.textContent = 'Paid. Waiting for the node to open your session…'; return; }
-            setSession({ node, name: offer?.name ?? new URL(node).hostname, key: r.api_key, created: Date.now() });
+            setSession({ node, name: pay.name, key: r.api_key, created: Date.now() });
           }
+          savePayment({ ...pay, status: 'paid', key: r.api_key ?? topupKey });
           const prev = credit ?? 0; await refreshCredit(); paid(Math.max(0, (credit ?? 0) - prev) || sats);
         }
       } catch { /* keep polling */ } finally { busy = false; }
@@ -233,7 +238,7 @@ export function createAiUi(h: H, toast: (m: string) => void) {
         h('div', { class: 'aicredit' }, h('b', {}, credit == null ? '…' : fmtSats(amt)), h('small', {}, fmtUsd(amt, usd) || '')),
         h('span', { class: 'ainode' }, `Held on ${s.name}, a Routstr node. Only this browser has the key.`)),
       left,
-      h('p', { class: 'note' }, 'Your credit stays here, even after you close the tab, until you refund it.'),
+      storageOk() ? h('p', { class: 'note' }, 'Your credit stays here, even after you close the tab, until you refund it.') : storageWarn(s),
       h('div', { class: 'gbtns' },
         h('button', { class: 'btn primary', onclick: () => void viewBuy(true) }, 'Top up'),
         h('button', { class: 'btn', 'aria-expanded': 'false', onclick: (e: Event) => { refundBox.hidden = !refundBox.hidden; (e.currentTarget as HTMLElement).setAttribute('aria-expanded', String(!refundBox.hidden)); if (!refundBox.hidden) (refundBox.querySelector('input') as HTMLInputElement | null)?.focus(); } }, 'Refund')),
@@ -246,25 +251,116 @@ export function createAiUi(h: H, toast: (m: string) => void) {
       try { const n = await pushSession(s); if (n) { store.set('lc.ai.synced', '1'); toast(`Saved to Nostr, encrypted to you (${n} relays)`); } else toast('No relay accepted it. Try again later.'); }
       catch (e: any) { toast(`Nostr: ${e.message}`); }
     } }, store.get('lc.ai.synced') ? 'Update on my other devices (Nostr)' : 'Keep on my other devices (Nostr)'));
-    const ln = h('input', { class: 'aiinp', placeholder: 'you@wallet.com (optional)', 'aria-label': 'Lightning address for the refund', autocomplete: 'off' }) as HTMLInputElement;
+    const end = refundForm(s, true);
+    refundBox.append(end);
+    body.append(history(), recoverBox(), privacy());
+    void refreshCredit().then(() => { if (dlg.open && body.contains(end)) { const b = body.querySelector('.aicredit b'); if (b) b.textContent = fmtSats(credit ?? 0); const sm = body.querySelector('.aicredit small'); if (sm) sm.textContent = fmtUsd(credit ?? 0, usd); } });
+  }
+
+  /** Refund a session: to a Lightning address, or as a Cashu token. */
+  function refundForm(s: Session, current: boolean) {
+    const ln = h('input', { class: 'aiinp', placeholder: 'you@wallet.com (optional)', 'aria-label': 'Lightning address for the refund', autocomplete: 'off', value: store.get('lc.ai.refundTo') ?? '' }) as HTMLInputElement;
     const st = h('p', { class: 'aistate' });
-    const end = h('div', { class: 'airefundin' },
+    return h('div', { class: 'airefundin' },
       h('p', { class: 'note' }, 'Send what is left back to you and end the session. Enter a Lightning address, or leave it empty to get a Cashu token for any Cashu wallet.'), ln,
-      h('button', { class: 'btn small', onclick: async () => {
+      h('button', { class: 'btn small primary', onclick: async () => {
         st.textContent = 'Refunding…';
         try {
+          if (ln.value.trim()) store.set('lc.ai.refundTo', ln.value.trim());
           const r = await refund(s, ln.value || undefined);
-          setSession(null); credit = null; changed();
-          if (store.get('lc.ai.synced') && hasSigner()) { void pushSession(null).catch(() => undefined); store.set('lc.ai.synced', ''); }
-          if (r.token) viewToken(r.token, r.sats);
-          else { body.innerHTML = ''; body.append(h('p', { class: 'glead' }, `Refunded ${r.sats ? fmtSats(Number(r.sats)) : 'your credit'} to ${r.recipient ?? ln.value}. Session ended.`), h('button', { class: 'btn', onclick: () => dlg.close() }, 'Done')); }
+          for (const p of payments()) if (p.key === s.key) savePayment({ ...p, status: 'refunded' });
+          if (current) {
+            setSession(null); credit = null; changed();
+            if (store.get('lc.ai.synced') && hasSigner()) { void pushSession(null).catch(() => undefined); store.set('lc.ai.synced', ''); }
+          }
+          if (r.token) void viewToken(r.token, r.sats);
+          else { body.innerHTML = ''; body.append(h('p', { class: 'glead' }, `Refunded ${r.sats ? fmtSats(Number(r.sats)) : 'your credit'} to ${r.recipient ?? ln.value}.${current ? ' Session ended.' : ''}`), h('button', { class: 'btn', onclick: () => dlg.close() }, 'Done')); }
         } catch (e: any) {
           if (e?.status === 409) st.textContent = 'A refund is already in progress. Try again in a moment.';
-          else st.textContent = `Refund failed: ${e.message}. Your session is kept, so nothing is lost.`;
+          else if (e?.status === 400 && /balance|zero|empty/i.test(e.message)) st.textContent = 'There is nothing left to refund on this key.';
+          else st.textContent = `Refund failed: ${e.message}. The credit is kept, so nothing is lost.`;
         }
-      } }, 'Refund and end session'), st);
-    refundBox.append(end); body.append(privacy());
-    void refreshCredit().then(() => { if (dlg.open && body.contains(end)) { const b = body.querySelector('.aicredit b'); if (b) b.textContent = fmtSats(credit ?? 0); const sm = body.querySelector('.aicredit small'); if (sm) sm.textContent = fmtUsd(credit ?? 0, usd); } });
+      } }, current ? 'Refund and end session' : 'Refund this payment'), st);
+  }
+  function storageWarn(s: Session | null) {
+    const url = location.href;
+    return h('div', { class: 'aiwarn', role: 'note' },
+      h('b', {}, 'This window can’t keep your credit'),
+      h('p', {}, s ? 'Your browser blocks storage for embedded pages, so this credit is only held until you close the tab. Copy the session code, or refund before you leave.'
+        : 'Your browser blocks storage for embedded pages here. Credit you add works in this tab, but is not kept after you close it. For credit that stays, open Layercraft in its own tab.'),
+      h('div', { class: 'gbtns' },
+        s ? h('button', { class: 'btn small', onclick: async () => { try { await navigator.clipboard.writeText(sessionCode(s)); toast('Session code copied. Paste it under “Restore a saved session” in the new tab.'); } catch { toast('Copy blocked here'); } } }, 'Copy session code') : null,
+        h('a', { class: 'btn small', href: url, target: '_blank', rel: 'noopener' }, 'Open in its own tab')));
+  }
+  /** Use a recovered key: as the session if there is none (or it is empty), otherwise offer its refund. */
+  async function adopt(node: string, name: string, key: string) {
+    const ss: Session = { node, name, key, created: Date.now() };
+    let sats = 0;
+    try { sats = (await balance(ss)).sats; } catch (e: any) { toast(e?.status === 401 ? 'That payment’s session has ended on its node' : 'Its node did not answer. Try again in a minute.'); return; }
+    const cur = getSession();
+    if (cur && cur.key === key) { await refreshCredit(); viewSession(); toast('That payment is already your credit'); return; }
+    let curSats = 0; if (cur) { try { curSats = (await balance(cur)).sats; } catch { curSats = 0; } }
+    if (!cur || curSats <= 0) { setSession(ss); await refreshCredit(); viewSession(); toast(`Recovered ${fmtSats(sats)}`); return; }
+    body.innerHTML = '';
+    body.append(h('p', { class: 'glead' }, `Recovered ${fmtSats(sats)}${usdOf(sats)} on ${name}. You already have credit in use, so refund this one back to you.`),
+      refundForm(ss, false), h('button', { class: 'btn small ghost', onclick: () => viewSession() }, 'Back'));
+  }
+  function recoverBox() {
+    const box = h('details', { class: 'gmore' }, h('summary', {}, 'Paid but no credit? Recover a payment'));
+    const ta = h('textarea', { class: 'aiinp', rows: 3, placeholder: 'lnbc…', 'aria-label': 'Paid Lightning invoice' }) as HTMLTextAreaElement;
+    const st = h('p', { class: 'aistate' });
+    box.append(h('p', { class: 'note' }, 'Open the payment in your Lightning wallet’s history and copy its invoice (it starts with lnbc). Paste it here: the node that issued it gives your credit back.'), ta,
+      h('button', { class: 'btn small primary', onclick: async () => {
+        const b = ta.value.trim().replace(/^lightning:/i, '').toLowerCase();
+        if (!/^ln(bc|tb|bcrt)[0-9a-z]+$/i.test(b)) { st.textContent = 'That does not look like a Lightning invoice.'; return; }
+        st.textContent = 'Asking the nodes…';
+        const known = payments().find((p) => p.bolt11.toLowerCase() === b.toLowerCase());
+        const r = await findPayment(b, known ? [known.node] : payments().map((p) => p.node));
+        if (!r) { st.textContent = 'No node recognised that invoice. Check you copied the whole thing.'; return; }
+        if (r.status !== 'paid') { st.textContent = r.status === 'pending' ? 'The node has not seen this payment arrive yet. Try again in a minute.' : `The node says this invoice is ${r.status}.`; return; }
+        if (!r.key) { st.textContent = 'Paid, but the node gave no key for it. Ask the node operator.'; return; }
+        savePayment({ node: r.node, name: r.name, bolt11: b, id: known?.id ?? b.slice(-16), sats: r.sats ?? known?.sats ?? 0, at: known?.at ?? Date.now(), topup: known?.topup ?? false, status: 'paid', key: r.key });
+        await adopt(r.node, r.name, r.key);
+      } }, 'Recover'), st);
+    return box;
+  }
+  function history() {
+    const list = payments();
+    const box = h('details', { class: 'gmore' }, h('summary', {}, `Payments (${list.length})`));
+    if (!list.length) { box.append(h('p', { class: 'note' }, 'None yet.')); return box; }
+    const label = { pending: 'Waiting', paid: 'Paid', expired: 'Expired, not paid', refunded: 'Refunded' } as const;
+    const ul = h('ul', { class: 'aipays' });
+    for (const p of list) {
+      const cur = getSession();
+      const lost = p.status === 'paid' && p.key && (!cur || cur.key !== p.key);
+      ul.append(h('li', {},
+        h('span', {}, h('b', {}, fmtSats(p.sats)), h('small', {}, `${new Date(p.at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} · ${p.name}`)),
+        h('span', { class: 'aipst ' + p.status }, label[p.status] ?? p.status),
+        lost ? h('button', { class: 'btn small', onclick: () => void adopt(p.node, p.name, p.key!) }, 'Recover') :
+        p.status === 'pending' ? h('button', { class: 'btn small', onclick: async () => { await checkPending(true); viewSessionOrBuy(); } }, 'Check') : null));
+    }
+    box.append(ul);
+    return box;
+  }
+  const viewSessionOrBuy = () => { if (getSession()) viewSession(); else void viewBuy(); };
+  /** A payment made in a tab that closed (or a frame that could not save): pick its key up from the node. */
+  async function checkPending(say = false) {
+    const cut = Date.now() - 48 * 3600e3;
+    let got = false;
+    for (const p of payments().filter((x) => x.status === 'pending' && x.at > cut)) {
+      try {
+        const r = await invoiceStatus(p.node, p.id);
+        if (r.status === 'paid') { savePayment({ ...p, status: 'paid', key: r.api_key ?? p.key }); got = true; }
+        else if (r.status === 'expired') savePayment({ ...p, status: 'expired' });
+      } catch { /* node offline: try later */ }
+    }
+    if (!getSession()) {
+      for (const p of payments().filter((x) => x.status === 'paid' && x.key && !x.topup)) {
+        const ss: Session = { node: p.node, name: p.name, key: p.key!, created: p.at };
+        try { const b = await balance(ss); if (b.sats > 0) { setSession(ss); await refreshCredit(); toast(`Your payment arrived: ${fmtSats(b.sats)} credit`); got = true; break; } } catch { /* ended */ }
+      }
+    }
+    if (say && !got) toast('Nothing new yet');
   }
 
   async function viewToken(token: string, sats?: string) {
@@ -353,6 +449,8 @@ export function createAiUi(h: H, toast: (m: string) => void) {
   };
 
   if (getSession()) void refreshCredit(); else drawBadge();
+  // payments that were made but never reached a saved session come back on their own
+  setTimeout(() => void checkPending(), 1500);
   void btcUsd().then((v) => { usd = v; });
   return { badge, open, create, check, visionCost, refreshCredit, credit: () => credit, usd: () => usd, hasSession: () => !!getSession(), onChange: (f: () => void) => listeners.add(f), modelLabel, maxCost, flat };
 }
