@@ -1543,6 +1543,12 @@ guided = createGuided({
     tracePalette = palette.slice(); traceOrder = null; S.traceColours = palette.length;
     touched = true; syncAll(); schedule(0); buildPanel(); autosave();
   },
+  /** Resolves once the stage shows the latest design (trace and render done), or after a minute. */
+  settled: async () => {
+    const t0 = performance.now();
+    await new Promise((z) => setTimeout(z, 200));
+    while (performance.now() - t0 < 60000 && (traceBusy || pending || !traceFresh() || $('#busy').classList.contains('on'))) await new Promise((z) => setTimeout(z, 150));
+  },
   setName: (n: string) => { projectName = n; $<HTMLInputElement>('#pname').value = n; },
   hasPicture: () => !!traceSrc && S.repeat === 'trace',
   picture: () => ({ src: traceSrc, name: traceName }),

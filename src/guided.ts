@@ -1,5 +1,6 @@
 // Guided mode: the default first-run experience. One step per screen, only the
 // controls that step needs. Everything else lives in Advanced (the full app).
+import { createMagic, type Magic } from './magic';
 import type { Settings } from './engine';
 import type { AiUi } from './aiui';
 import { IDEA_PROMPT, fmtSats, fmtUsd, type PictureCheck } from './ai';
@@ -74,6 +75,7 @@ export interface GuidedApi {
   parseColours: (text: string) => string[];
   forgetPalette: () => void;
   cutReady: (url: string, plan: string[] | null, levels: number) => Promise<{ url: string; cols: string[]; plan: string[]; report: CutReport; check: PictureCheck } | null>;
+  settled: () => Promise<void>;
   setName: (n: string) => void;
   art: () => unknown;
   setArt: (a: unknown) => void;
@@ -108,15 +110,24 @@ export function createGuided(api: GuidedApi) {
   const lead = (t: string) => h('p', { class: 'glead' }, t);
   let ideaOpen = false, ideaText = store.get('lc.ai.idea') ?? '', busyMsg = '';
   const busyEl = h('div', { class: 'gbusy', role: 'status', 'aria-live': 'polite', hidden: true });
-  const busy = (m: string) => {
-    busyMsg = m; busyEl.hidden = !m;
-    busyEl.innerHTML = ''; if (m) busyEl.append(h('span', { class: 'spin' }), h('b', {}, m), h('small', {}, 'Usually 20 to 60 seconds. Keep this tab open.'));
-    host.querySelectorAll<HTMLButtonElement>('.aibtn').forEach((b) => { b.disabled = !!m; });
+  let magic: Magic | null = null, busyStop: (() => void) | undefined;
+  const busy = (m: string, o: { stop?: () => void; colours?: string[] } = {}) => {
+    busyMsg = m; busyStop = m ? o.stop : undefined;
+    const vp = document.getElementById('viewport');
+    if (vp && !magic) magic = createMagic(vp);
+    if (m) magic?.show(m, { ...o, long: !/^(Checking|Building)/.test(m) }); else magic?.hide();
+    host.querySelectorAll<HTMLButtonElement>('.aibtn').forEach((b) => {
+      const stopper = !!busyStop && b.dataset.stoppable === '1';
+      b.disabled = !!m && !stopper; b.classList.toggle('stopping', stopper);
+      b.setAttribute('aria-label', stopper ? 'Stop making this picture' : b.dataset.label ?? '');
+    });
   };
   /** A paid AI action: shows the price, asks for credit when there is none. */
-  function aiButton(label: string, run: () => Promise<void>, cost: () => Promise<number | null> = api.ai.maxCost, cls = 'primary') {
+  function aiButton(label: string, run: () => Promise<void>, cost: () => Promise<number | null> = api.ai.maxCost, cls = 'primary', stoppable = false) {
     const price = h('small', {}, '');
-    const b = h('button', { class: `btn ${cls} gbig aibtn`, disabled: busyMsg ? true : undefined, onclick: () => { if (!busyMsg) void run(); } }, h('b', {}, label), price) as HTMLButtonElement;
+    const live = stoppable && !!busyMsg && !!busyStop;
+    const b = h('button', { class: `btn ${cls} gbig aibtn${live ? ' stopping' : ''}`, 'data-label': label, 'data-stoppable': stoppable ? '1' : undefined, disabled: busyMsg && !live ? true : undefined,
+      onclick: () => { if (busyMsg) { if (stoppable) busyStop?.(); return; } void run(); } }, h('b', {}, label), price) as HTMLButtonElement;
     void cost().then((m) => { if (m) { const u = fmtUsd(m, api.ai.usd()); price.textContent = `up to ${fmtSats(m)}${u ? ` · ${u}` : ''}`; } });
     return b;
   }

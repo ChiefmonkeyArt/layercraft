@@ -1,7 +1,7 @@
 // The AI credit sheet: pay with Lightning (QR) or Cashu, see what's left, top up, end and refund.
 import QRCode from 'qrcode';
 import {
-  FLAT_MODEL, MODELS, newerModels, NodeOffer, Session, balance, btcUsd, createInvoice, findOffers, fmtSats, fmtUsd, generateImage, getSession,
+  shortfall, markNode,   FLAT_MODEL, MODELS, newerModels, NodeOffer, Session, balance, btcUsd, createInvoice, findOffers, fmtSats, fmtUsd, generateImage, getSession,
   invoiceStatus, findPayment, payments, savePayment, Payment, parseSessionCode, redeemCashu, refund, sessionCode, setSession, shrinkForUpload, topupCashu,
   checkPicture, visionOffer, type PictureCheck,
 } from './ai';
@@ -284,13 +284,18 @@ export function createAiUi(h: H, toast: (m: string) => void) {
   }
   function storageWarn(s: Session | null) {
     const url = location.href;
+    // a sandboxed preview has no origin of its own: no tab can save there, so don't suggest one
+    const sealed = location.origin === 'null' || /(^|\.)sites\.pplx\.app$|perplexity\.ai$/.test(location.hostname) || (() => { try { return window.top !== window && !document.referrer; } catch { return true; } })();
     return h('div', { class: 'aiwarn', role: 'note' },
-      h('b', {}, 'This window can’t keep your credit'),
-      h('p', {}, s ? 'Your browser blocks storage for embedded pages, so this credit is only held until you close the tab. Copy the session code, or refund before you leave.'
-        : 'Your browser blocks storage for embedded pages here. Credit you add works in this tab, but is not kept after you close it. For credit that stays, open Layercraft in its own tab.'),
+      h('b', {}, sealed ? 'This preview can’t save your credit' : 'This window can’t keep your credit'),
+      h('p', {}, sealed
+        ? (s ? 'This test copy of Layercraft can’t store anything, so this credit lasts only until you close or reload the tab. Refund what is left before you leave, or copy the session code.'
+             : 'This test copy of Layercraft can’t store anything. Credit you add works until you close or reload the tab; refund what is left before you leave. The published app keeps credit between visits.')
+        : (s ? 'Your browser blocks storage here, so this credit is only held until you close the tab. Copy the session code, or refund before you leave.'
+             : 'Your browser blocks storage here. Credit you add works in this tab, but is not kept after you close it. For credit that stays, open Layercraft in its own tab.')),
       h('div', { class: 'gbtns' },
-        s ? h('button', { class: 'btn small', onclick: async () => { try { await navigator.clipboard.writeText(sessionCode(s)); toast('Session code copied. Paste it under “Restore a saved session” in the new tab.'); } catch { toast('Copy blocked here'); } } }, 'Copy session code') : null,
-        h('a', { class: 'btn small', href: url, target: '_blank', rel: 'noopener' }, 'Open in its own tab')));
+        s ? h('button', { class: 'btn small', onclick: async () => { try { await navigator.clipboard.writeText(sessionCode(s)); toast('Session code copied. Paste it under “Restore a saved session” later.'); } catch { toast('Copy blocked here'); } } }, 'Copy session code') : null,
+        sealed ? null : h('a', { class: 'btn small', href: url, target: '_blank', rel: 'noopener' }, 'Open in its own tab')));
   }
   /** Use a recovered key: as the session if there is none (or it is empty), otherwise offer its refund. */
   async function adopt(node: string, name: string, key: string) {
@@ -380,10 +385,13 @@ export function createAiUi(h: H, toast: (m: string) => void) {
   }
 
   /** Make one picture; asks for credit first if there is none. `use` overrides the model (the flat redraw). */
-  async function create(prompt: string, ref: string | string[] | undefined, aspect: string, onStart: () => void, use?: string, again = false): Promise<string | null> {
+  /** Why the last create gave no picture, in plain words (null when it worked or was stopped). */
+  let problem: string | null = null;
+  async function create(prompt: string, ref: string | string[] | undefined, aspect: string, onStart: () => void, use?: string, again = false, stop?: AbortSignal): Promise<string | null> {
+    problem = null;
     if (!getSession() && !(await askForCredit())) return null; // pays, then carries straight on
     const s = getSession();
-    if (!s) return null;
+    if (!s || stop?.aborted) return null;
     let m = use ?? model;
     // the credit lives on one node: if it doesn't offer this model, fall back to one it does
     if (use) {
@@ -396,15 +404,32 @@ export function createAiUi(h: H, toast: (m: string) => void) {
     onStart();
     try {
       const refUrl = Array.isArray(ref) ? await Promise.all(ref.map((r) => shrinkForUpload(r))) : ref ? await shrinkForUpload(ref) : undefined;
-      const url = await generateImage(s, m, prompt, refUrl, aspect);
+      const url = await generateImage(s, m, prompt, refUrl, aspect, stop);
+      markNode(s.node, true);
       void refreshCredit();
       return url;
     } catch (e: any) {
-      void refreshCredit();
-      if (e?.status === 402 || /balance|insufficient/i.test(e?.message ?? '')) {
-        toast('Not enough credit for this picture. Top up and it carries on.');
-        if (!again && (await askForCredit(true))) return create(prompt, ref, aspect, onStart, use, true);
-      } else toast(`The AI could not make it: ${e.message}`);
+      if (e?.stopped || stop?.aborted) { void refreshCredit(); return null; }
+      const said = String(e?.message ?? 'no reason given');
+      const short = shortfall(said);
+      let have: number | null = null, held = 0;
+      try { const b = await balance(s); have = b.sats - b.reserved; held = b.reserved; credit = b.sats; changed(); } catch { /* keep going */ }
+      if (short) { have = short.have; held = Math.max(held, short.held); }
+      const need = short?.need ?? (await maxCost()) ?? 0;
+      const lowCredit = (e?.status === 402 || /insufficient balance/i.test(said)) && have !== null && have < need;
+      if (lowCredit && held > 0 && have! + held >= need) {
+        // the node is still holding credit for an earlier picture: paying more is not the answer
+        problem = `${s.name} is still holding ${fmtSats(held)} for an earlier picture that has not finished. It lets go when that one ends, usually within a few minutes. Your credit is safe: try again shortly, or refund it from the wallet.`;
+      } else if (lowCredit) {
+        toast(`This picture needs up to ${fmtSats(need)} and ${fmtSats(Math.max(0, have!))} is free. Top up and it carries on.`);
+        if (!again && !stop?.aborted && (await askForCredit(true))) return create(prompt, ref, aspect, onStart, use, true, stop);
+        problem = 'Not enough credit for this picture yet.';
+      } else {
+        // the node or its AI provider failed; the user's credit is not the issue
+        markNode(s.node, false);
+        problem = `${s.name} could not make the picture${e?.status ? ` (it answered ${e.status})` : ''}: “${said.slice(0, 160)}”. Your ${credit != null ? fmtSats(credit) + ' ' : ''}credit is safe. Try again, or refund it from the wallet and pay a different node.`;
+      }
+      toast(problem);
       return null;
     }
   }
@@ -452,6 +477,6 @@ export function createAiUi(h: H, toast: (m: string) => void) {
   // payments that were made but never reached a saved session come back on their own
   setTimeout(() => void checkPending(), 1500);
   void btcUsd().then((v) => { usd = v; });
-  return { badge, open, create, check, visionCost, refreshCredit, credit: () => credit, usd: () => usd, hasSession: () => !!getSession(), onChange: (f: () => void) => listeners.add(f), modelLabel, maxCost, flat };
+  return { badge, open, create, problem: () => problem, check, visionCost, refreshCredit, credit: () => credit, usd: () => usd, hasSession: () => !!getSession(), onChange: (f: () => void) => listeners.add(f), modelLabel, maxCost, flat };
 }
 export type AiUi = ReturnType<typeof createAiUi>;

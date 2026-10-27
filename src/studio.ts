@@ -23,8 +23,8 @@ const KEEP_SHOTS = 6; // pictures kept per chat (older ones keep their message, 
 type H = GuidedApi['h'];
 export interface StudioCtx {
   api: GuidedApi; h: H;
-  busy: (m: string) => void;
-  aiButton: (label: string, run: () => Promise<void>, cost?: () => Promise<number | null>, cls?: string) => HTMLButtonElement;
+  busy: (m: string, o?: { stop?: () => void; colours?: string[] }) => void;
+  aiButton: (label: string, run: () => Promise<void>, cost?: () => Promise<number | null>, cls?: string, stoppable?: boolean) => HTMLButtonElement;
   chips: <T>(label: string, opts: [T, string, string?][], get: () => T, set: (v: T) => void) => HTMLElement;
   stepper: (label: string, get: () => number, set: (v: number) => void, note: () => string, min?: number) => HTMLElement;
   draw: () => void;
@@ -100,6 +100,7 @@ export function createStudio(x: StudioCtx) {
   }
   const rebuildSoon = () => { clearTimeout(rebuildTimer); rebuildTimer = window.setTimeout(() => void rebuild(), 600); };
 
+  let making: AbortController | null = null;
   async function send(which: Which, text: string) {
     const p = art[which], cur = shot(which), H = shot('hero'), ref = attach[which];
     if (which === 'pop' && !H) { api.toast('Make the Hero first'); return; }
@@ -112,8 +113,19 @@ export function createStudio(x: StudioCtx) {
     } else if (cur) { prompt = POP_REFINE_PROMPT(text, plan, ref.length); refs = [cur.src, H!.src, ...ref]; }
     else { prompt = POP_PROMPT(text, plan, ref.length); refs = [H!.src, ...ref]; }
     const aspect = H ? nearestAspect(H.w, H.h) : '3:4';
-    const url = await api.ai.create(prompt, refs.length ? refs : undefined, aspect, () => x.busy(which === 'hero' ? (cur ? 'Changing your Hero…' : 'Drawing your Hero…') : (cur ? 'Changing the Pop…' : 'Drawing the Pop…')));
-    if (!url) { x.busy(''); x.draw(); return; } // no credit, or the AI failed (it said why); the message stays in the box
+    if (making) return; // one picture at a time
+    const ac = new AbortController(); making = ac;
+    const msg = which === 'hero' ? (cur ? 'Changing your Hero…' : 'Drawing your Hero…') : (cur ? 'Changing the Pop…' : 'Drawing the Pop…');
+    const stop = () => { ac.abort(); x.busy(''); api.toast('Stopped. Change your words and press Create again.'); x.draw(); };
+    let url: string | null = null;
+    try { url = await api.ai.create(prompt, refs.length ? refs : undefined, aspect, () => x.busy(msg, { stop, colours: plan }), undefined, false, ac.signal); }
+    finally { making = null; }
+    if (ac.signal.aborted) return;
+    if (!url) { // no credit, or the node failed: say why in the chat; the words stay in the box
+      const why = api.ai.problem();
+      if (why) { p.chat.push({ you: false, text: why }); save(); }
+      x.busy(''); x.draw(); return;
+    }
     if (which === 'hero' && !art.hero.shots.length) {
       // a new piece: its own project, named from the first words
       api.projects.startNew();
@@ -139,6 +151,7 @@ export function createStudio(x: StudioCtx) {
     if (which === 'pop') art.noPop = false;
     x.busy('Building the stack…');
     await rebuild();
+    await api.settled();
     x.busy(''); x.draw();
   }
   async function fix(which: Which) {
@@ -196,7 +209,7 @@ export function createStudio(x: StudioCtx) {
     const chip = attach[which].length ? h('div', { class: 'gattach' }, ...attach[which].map((src, k) => h('span', { class: 'gatt' }, h('img', { src, alt: `Picture ${k + 1} to send` }),
       h('button', { class: 'gpdel', 'aria-label': `Remove picture ${k + 1}`, onclick: () => { attach[which].splice(k, 1); x.draw(); } }, '×'))),
       h('small', {}, attach[which].length === 1 ? 'Attached' : `${attach[which].length} attached`)) : null;
-    const sendBtn = x.aiButton(cur ? 'Send change' : which === 'hero' ? 'Create' : 'Create the Pop', () => send(which, ta.value));
+    const sendBtn = x.aiButton(cur ? 'Send change' : which === 'hero' ? 'Create' : 'Create the Pop', () => send(which, ta.value), undefined, undefined, true);
     const plan = planOf(p);
     const sw = h('div', { class: 'gswatches', 'aria-label': 'Colours, back sheet first' });
     for (const c of plan) sw.append(h('i', { style: `background:${c}`, title: `${c} ${colourName(c)}` }));

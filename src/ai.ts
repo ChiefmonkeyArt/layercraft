@@ -38,9 +38,32 @@ const okUrl = (u: string) => {
   } catch { return false; }
 };
 
-async function timed(url: string, init: RequestInit = {}, ms = 9000): Promise<Response> {
-  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), ms);
-  try { return await fetch(url, { ...init, signal: ac.signal }); } finally { clearTimeout(t); }
+async function timed(url: string, init: RequestInit = {}, ms = 9000, stop?: AbortSignal): Promise<Response> {
+  const ac = new AbortController(); let late = false;
+  const t = setTimeout(() => { late = true; ac.abort(); }, ms);
+  const off = () => ac.abort(); stop?.addEventListener('abort', off);
+  try { return await fetch(url, { ...init, signal: ac.signal }); }
+  catch (e: any) {
+    if (stop?.aborted) { const x = new Error('Stopped') as Error & { stopped: boolean }; x.stopped = true; throw x; }
+    if (late) { const x = new Error(`The node took longer than ${Math.round(ms / 60000)} minutes and was stopped`) as Error & { status: number }; x.status = 504; throw x; }
+    throw e;
+  } finally { clearTimeout(t); stop?.removeEventListener('abort', off); }
+}
+/** Nodes that recently failed to make a picture go to the back of the queue for a few hours. */
+const troubleMem: Record<string, number> = {};
+export function nodeTrouble(): Record<string, number> {
+  try { return { ...troubleMem, ...JSON.parse(localStorage.getItem('lc.ai.trouble') || '{}') }; } catch { return troubleMem; }
+}
+export function markNode(url: string, ok: boolean) {
+  const t = nodeTrouble(); if (ok) delete t[url]; else t[url] = Date.now();
+  if (ok) delete troubleMem[url]; else troubleMem[url] = Date.now();
+  try { localStorage.setItem('lc.ai.trouble', JSON.stringify(t)); } catch { /* storage blocked */ }
+  for (const v of offersCache.values()) v.at = 0;
+}
+/** Reads the node's own reason for a 402: Routstr says "N mSats required. M available. (reserved: R)". */
+export function shortfall(msg: string): { need: number; have: number; held: number } | null {
+  const m = /(\d+)\s*mSats required\.?\s*(-?\d+)\s*available(?:.*?reserved:?\s*(\d+))?/i.exec(msg);
+  return m ? { need: Math.ceil(+m[1] / 1000), have: Math.floor(+m[2] / 1000), held: Math.floor(+(m[3] ?? 0) / 1000) } : null;
 }
 
 /** Routstr nodes announced on Nostr (kind 38421), newest first. */
@@ -94,7 +117,8 @@ export async function findOffers(model: string): Promise<NodeOffer[]> {
       if (m && isFinite(max) && max > 0) offers.push({ url: u, name: names.get(u) || new URL(u).hostname, maxSats: Math.ceil(max) });
     } catch { /* node offline or blocked */ }
   }));
-  offers.sort((a, b) => a.maxSats - b.maxSats);
+  const bad = (u: string) => (Date.now() - (nodeTrouble()[u] ?? 0) < 6 * 3600e3 ? 1 : 0);
+  offers.sort((a, b) => bad(a.url) - bad(b.url) || a.maxSats - b.maxSats);
   offersCache.set(model, { at: Date.now(), offers });
   return offers;
 }
@@ -185,13 +209,13 @@ export async function refund(s: Session, lightningAddress?: string): Promise<{ t
 }
 
 /** One picture from a prompt, optionally with a reference picture. Returns a data URL. */
-export async function generateImage(s: Session, model: string, prompt: string, ref?: string | string[], aspect = '3:4'): Promise<string> {
+export async function generateImage(s: Session, model: string, prompt: string, ref?: string | string[], aspect = '3:4', stop?: AbortSignal): Promise<string> {
   const content: any[] = [{ type: 'text', text: prompt }];
   for (const r of (Array.isArray(ref) ? ref : ref ? [ref] : [])) content.push({ type: 'image_url', image_url: { url: r } });
   const j = await json(await timed(`${s.node}/v1/chat/completions`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
     body: JSON.stringify({ model, messages: [{ role: 'user', content }], modalities: ['image', 'text'], image_config: { aspect_ratio: aspect }, stream: false }),
-  }, 180000));
+  }, 240000, stop));
   const msg = j?.choices?.[0]?.message;
   const img = msg?.images?.[0]?.image_url?.url ?? msg?.images?.[0]?.url
     ?? (Array.isArray(msg?.content) ? msg.content.find((c: any) => c?.type === 'image_url')?.image_url?.url : null)

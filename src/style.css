@@ -458,3 +458,21 @@ body.guided.gnohero .toolbar, body.guided.gnohero footer.status { visibility: hi
 .aipst.paid { color: #7fd18b; }
 .aipst.pending { color: #f0b46b; }
 .aiwarn a.btn { color: var(--text); text-decoration: none; }
+
+/* creating: soft light over the stage, Create turns into Stop */
+.gmagic { position: absolute; inset: 0; z-index: 6; display: grid; place-items: center; background: radial-gradient(ellipse at center, color-mix(in srgb, var(--bg) 70%, #1a1030) 0%, var(--bg) 75%); animation: gmagicin .5s ease-out; }
+.gmagic[hidden] { display: none; }
+.gmagic canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.gmagicbox { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 16px 22px; border-radius: 16px; text-align: center; max-width: 34ch;
+  background: color-mix(in srgb, var(--bg) 55%, transparent); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.gmagicbox b { font-family: var(--font-display); font-size: 1.15rem; color: var(--text); animation: gbreathe 3.2s ease-in-out infinite; }
+.gmagict { font-variant-numeric: tabular-nums; color: var(--muted); font-size: var(--text-sm); }
+.gmagicbox small { color: var(--muted); min-height: 2.4em; }
+@keyframes gmagicin { from { opacity: 0; } to { opacity: 1; } }
+@keyframes gbreathe { 0%, 100% { opacity: .75; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .gmagic, .gmagicbox b { animation: none; } }
+.gbusy { display: none !important; }
+.aibtn.stopping { background: var(--surface, #222); color: var(--text); border-color: var(--line); }
+.aibtn.stopping > * { display: none; }
+.aibtn.stopping::after { content: 'Stop'; font-weight: 600; }
+@media (max-width: 860px) { body.guided.gnohero.gmagicon #viewport { display: block; min-height: 46vh; } }
