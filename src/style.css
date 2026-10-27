@@ -415,3 +415,35 @@ body.guided.gnohero .toolbar, body.guided.gnohero footer.status { visibility: hi
 .gatt { position: relative; display: inline-flex; }
 .gatt .gpdel { position: absolute; top: -8px; right: -8px; width: 22px; height: 22px; font-size: 0.95rem; background: var(--panel); border: 1px solid var(--line); border-radius: 50%; color: var(--text); }
 .gplus:disabled { opacity: .4; cursor: not-allowed; }
+/* ---------- wallet chip and thank-you ---------- */
+.aibadge { position: relative; display: inline-flex; align-items: center; gap: 7px; }
+.aibadge svg { flex-shrink: 0; color: #f7931a; }
+.aibadge.empty { color: var(--muted); border-color: var(--line); }
+.aibadge.empty svg { color: var(--muted); }
+.aibadge.bump { animation: aibump .6s ease-out; }
+@keyframes aibump { 0% { box-shadow: 0 0 0 0 rgba(247, 147, 26, .55); } 100% { box-shadow: 0 0 0 12px rgba(247, 147, 26, 0); } }
+.aiplus { position: absolute; right: 8px; top: -2px; font-size: var(--text-xs); font-weight: 700; color: #f7b25a; pointer-events: none; animation: aiplus 1.8s ease-out forwards; }
+@keyframes aiplus { 0% { opacity: 0; transform: translateY(6px); } 20% { opacity: 1; } 100% { opacity: 0; transform: translateY(-22px); } }
+.aiwallet { display: flex; flex-direction: column; gap: 4px; padding: 14px; border-radius: 12px; background: linear-gradient(135deg, rgba(247, 147, 26, .14), rgba(247, 147, 26, .03)); border: 1px solid rgba(247, 147, 26, .3); }
+.aiwallet .aicredit b { color: #f7b25a; }
+.ainode { color: var(--muted); font-size: var(--text-xs); }
+.airefund { border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.airefundin { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.aithanks { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; padding: 18px 4px 10px; }
+.aithanks > b { font-family: var(--font-display); font-size: 1.5rem; font-weight: 800; animation: aiup .5s .55s both ease-out; }
+.aiadded { margin: 0; font-size: 1.05rem; color: #f7b25a; font-variant-numeric: tabular-nums; animation: aiup .5s .7s both ease-out; }
+.aiadded span { font-weight: 700; }
+.aithanks small { color: var(--muted); animation: aiup .5s .85s both ease-out; }
+.aithanks .aistate { animation: aiup .5s 1s both ease-out; }
+.aitick { width: 84px; height: 84px; }
+.aitick .ring { fill: none; stroke: #f7931a; stroke-width: 3; stroke-dasharray: 189; stroke-dashoffset: 189; transform: rotate(-90deg); transform-origin: 36px 36px; animation: aidraw .7s ease-out forwards; }
+.aitick .bolt { fill: #f7931a; transform-origin: 36px 36px; animation: aibolt .9s ease-in-out forwards; }
+.aitick .tick { fill: none; stroke: #f7b25a; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 44; stroke-dashoffset: 44; animation: aidraw .4s .75s ease-out forwards; }
+@keyframes aidraw { to { stroke-dashoffset: 0; } }
+@keyframes aibolt { 0% { opacity: 0; transform: scale(.6); } 35% { opacity: 1; transform: scale(1.05); } 70% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(.7); } }
+@keyframes aiup { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .aitick .ring, .aitick .tick { animation: none; stroke-dashoffset: 0; }
+  .aitick .bolt { display: none; }
+  .aithanks > *, .aiplus, .aibadge.bump { animation: none !important; }
+}

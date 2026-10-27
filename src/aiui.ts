@@ -27,20 +27,33 @@ export function createAiUi(h: H, toast: (m: string) => void) {
   const listeners = new Set<() => void>();
   const changed = () => { drawBadge(); listeners.forEach((f) => f()); };
 
-  const badge = h('button', { class: 'btn ghost aibadge', hidden: true, title: 'AI credit', onclick: () => open() });
+  const WALLET = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H18v3"/><rect x="3" y="7.5" width="18" height="12" rx="2.5"/><path d="M16.5 13.5h.01"/></svg>';
+  const badge = h('button', { class: 'btn ghost aibadge', title: 'Your AI credit', onclick: () => open() });
+  const badgeAmt = h('span', { class: 'aiamt' });
+  badge.innerHTML = WALLET; badge.append(badgeAmt);
+  let shown: number | null = null;
   const drawBadge = () => {
     const s = getSession();
-    badge.hidden = !s;
-    badge.textContent = s ? (credit == null ? 'AI credit' : `${fmtSats(credit)}`) : '';
-    badge.setAttribute('aria-label', credit == null ? 'AI credit' : `AI credit: ${fmtSats(credit)}`);
+    badge.classList.toggle('empty', !s);
+    badgeAmt.textContent = !s ? 'Add credit' : credit == null ? 'Credit' : fmtSats(credit);
+    badge.setAttribute('aria-label', !s ? 'Add AI credit' : credit == null ? 'Your AI credit' : `Your AI credit: ${fmtSats(credit)}. Open for details, top up or refund.`);
+    // credit went up: a small "+N" rises from the chip
+    if (s && credit != null && shown != null && credit > shown) {
+      const f = h('span', { class: 'aiplus', 'aria-hidden': 'true' }, `+${(credit - shown).toLocaleString('en-GB')}`);
+      badge.append(f); badge.classList.remove('bump'); void badge.offsetWidth; badge.classList.add('bump');
+      setTimeout(() => f.remove(), 1800);
+    }
+    shown = s ? credit : null;
   };
 
   const dlg = h('dialog', { class: 'aisheet', 'aria-label': 'AI credit' }) as HTMLDialogElement;
-  dlg.addEventListener('close', () => { clearInterval(poll); });
+  /** a paused action waiting for the user to pay: resolved true when credit arrives, false if they close the sheet */
+  let payWait: ((ok: boolean) => void) | null = null;
+  dlg.addEventListener('close', () => { clearInterval(poll); const w = payWait; payWait = null; w?.(false); });
   dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
   document.body.append(dlg);
   const body = h('div', { class: 'aibody' });
-  dlg.append(h('div', { class: 'aihead' }, h('b', {}, 'AI credit'), h('button', { class: 'gpdel', 'aria-label': 'Close', onclick: () => dlg.close() }, '×')), body);
+  dlg.append(h('div', { class: 'aihead' }, h('b', {}, 'Your AI credit'), h('button', { class: 'gpdel', 'aria-label': 'Close', onclick: () => dlg.close() }, '×')), body);
 
   const privacy = () => h('p', { class: 'note aipriv' },
     'Bitcoin only, no account. You pay a public Routstr node directly; it sees your prompt and the picture you send, and forwards them to the model. Layercraft never sees your payment or your key.');
@@ -143,7 +156,7 @@ export function createAiUi(h: H, toast: (m: string) => void) {
             if (!r.api_key) { st.textContent = 'Paid. Waiting for the node to open your session…'; return; }
             setSession({ node, name: offer?.name ?? new URL(node).hostname, key: r.api_key, created: Date.now() });
           }
-          await refreshCredit(); toast('Payment received'); paid();
+          const prev = credit ?? 0; await refreshCredit(); paid(Math.max(0, (credit ?? 0) - prev) || sats);
         }
       } catch { /* keep polling */ } finally { busy = false; }
     }, 2500);
@@ -162,16 +175,47 @@ export function createAiUi(h: H, toast: (m: string) => void) {
             const s = getSession();
             if (topup && s) await topupCashu(s, ta.value);
             else setSession({ node, name: offer?.name ?? new URL(node).hostname, key: await redeemCashu(node, ta.value), created: Date.now() });
-            await refreshCredit(); toast('Credit added'); paid();
+            const prev = topup ? credit ?? 0 : 0; await refreshCredit(); paid(Math.max(0, (credit ?? 0) - prev));
           } catch (e: any) { st.textContent = e?.status ? `Not accepted: ${e.message}. The node may not take tokens from that mint.` : e.message; }
         } }, 'Add credit'),
         h('button', { class: 'btn small ghost', onclick: () => void viewBuy(topup) }, 'Back')),
       st, privacy());
   }
 
-  function paid() {
-    const go = afterPay; afterPay = null;
-    if (go) { dlg.close(); go(); } else viewSession();
+  /** Payment arrived: a short thank-you, then straight back to what the user was doing. */
+  function paid(added: number) {
+    const w = payWait, go = afterPay; payWait = null; afterPay = null;
+    thanks(added, !!w);
+    const done = () => {
+      if (w) { dlg.close(); w(true); }
+      else if (go) { dlg.close(); go(); }
+      else viewSession();
+    };
+    setTimeout(done, matchMedia('(prefers-reduced-motion: reduce)').matches ? 1200 : 2100);
+  }
+  function thanks(added: number, cont: boolean) {
+    clearInterval(poll);
+    body.innerHTML = '';
+    const num = h('span', {}, '0');
+    const card = h('div', { class: 'aithanks', role: 'status', 'aria-live': 'polite' });
+    card.innerHTML = '<svg class="aitick" viewBox="0 0 72 72" aria-hidden="true"><circle class="ring" cx="36" cy="36" r="30"/><path class="bolt" d="M39 14 24 39h11l-3 19 16-26H37z"/><path class="tick" d="M22 37l9 9 19-20"/></svg>';
+    card.append(h('b', {}, 'Thank you'), h('p', { class: 'aiadded' }, '+', num, ' sats added'),
+      h('small', {}, `Balance ${fmtSats(credit ?? added)}${usdOf(credit ?? added)}`),
+      cont ? h('p', { class: 'aistate' }, 'Starting your picture…') : '');
+    body.append(card);
+    const t0 = performance.now(), T = 900;
+    const step = (t: number) => { const k = Math.min(1, (t - t0) / T), e = 1 - (1 - k) ** 3; num.textContent = Math.round(added * e).toLocaleString('en-GB'); if (k < 1) requestAnimationFrame(step); };
+    requestAnimationFrame(step);
+  }
+  /** Ask for credit and wait: resolves true once paid (the caller carries on), false if the sheet is closed. */
+  function askForCredit(topup = false): Promise<boolean> {
+    return new Promise((res) => {
+      const old = payWait; payWait = null; old?.(false);
+      afterPay = null;
+      if (!dlg.open) dlg.showModal();
+      payWait = res;
+      if (topup && getSession()) void viewBuy(true); else if (getSession()) viewSession(); else void viewBuy();
+    });
   }
 
   function viewSession() {
@@ -180,12 +224,23 @@ export function createAiUi(h: H, toast: (m: string) => void) {
     if (!s) { void viewBuy(); return; }
     body.innerHTML = '';
     const amt = credit ?? 0;
+    const per = (offers.find((o) => o.url === s.node) ?? null)?.maxSats ?? null;
+    const left = h('p', { class: 'note' }, per && credit != null ? `Enough for about ${Math.max(0, Math.floor(amt / per))} picture${Math.floor(amt / per) === 1 ? '' : 's'} at up to ${fmtSats(per)} each. Usually less is taken.` : '');
+    if (!per) void loadOffers().then(() => { const m = (offers.find((o) => o.url === s.node))?.maxSats; if (m && credit != null && body.contains(left)) left.textContent = `Enough for about ${Math.floor((credit ?? 0) / m)} picture${Math.floor((credit ?? 0) / m) === 1 ? '' : 's'} at up to ${fmtSats(m)} each. Usually less is taken.`; }).catch(() => undefined);
+    const refundBox = h('div', { class: 'airefund', hidden: true });
     body.append(
-      h('div', { class: 'aicredit' }, h('b', {}, credit == null ? '…' : fmtSats(amt)), h('small', {}, fmtUsd(amt, usd) || ''), h('span', {}, `on ${s.name}`)),
-      h('p', { class: 'note' }, 'Your credit stays here, even after you close the tab, until you end the session.'),
+      h('div', { class: 'aiwallet' },
+        h('div', { class: 'aicredit' }, h('b', {}, credit == null ? '…' : fmtSats(amt)), h('small', {}, fmtUsd(amt, usd) || '')),
+        h('span', { class: 'ainode' }, `Held on ${s.name}, a Routstr node. Only this browser has the key.`)),
+      left,
+      h('p', { class: 'note' }, 'Your credit stays here, even after you close the tab, until you refund it.'),
       h('div', { class: 'gbtns' },
-        h('button', { class: 'btn', onclick: () => void viewBuy(true) }, 'Top up'),
-        h('button', { class: 'btn', onclick: async () => { try { await navigator.clipboard.writeText(sessionCode(s)); toast('Session code copied. Anyone with it can spend this credit.'); } catch { toast('Copy blocked here'); } } }, 'Save session code')),
+        h('button', { class: 'btn primary', onclick: () => void viewBuy(true) }, 'Top up'),
+        h('button', { class: 'btn', 'aria-expanded': 'false', onclick: (e: Event) => { refundBox.hidden = !refundBox.hidden; (e.currentTarget as HTMLElement).setAttribute('aria-expanded', String(!refundBox.hidden)); if (!refundBox.hidden) (refundBox.querySelector('input') as HTMLInputElement | null)?.focus(); } }, 'Refund')),
+      refundBox,
+      h('details', { class: 'gmore' }, h('summary', {}, 'Use this credit on another device'),
+        h('p', { class: 'note' }, 'A session code moves this credit to another browser. Anyone with it can spend the credit, so keep it private.'),
+        h('button', { class: 'btn small', onclick: async () => { try { await navigator.clipboard.writeText(sessionCode(s)); toast('Session code copied. Anyone with it can spend this credit.'); } catch { toast('Copy blocked here'); } } }, 'Copy session code')),
     );
     if (hasSigner()) body.append(h('button', { class: 'btn small ghost', onclick: async () => {
       try { const n = await pushSession(s); if (n) { store.set('lc.ai.synced', '1'); toast(`Saved to Nostr, encrypted to you (${n} relays)`); } else toast('No relay accepted it. Try again later.'); }
@@ -193,8 +248,8 @@ export function createAiUi(h: H, toast: (m: string) => void) {
     } }, store.get('lc.ai.synced') ? 'Update on my other devices (Nostr)' : 'Keep on my other devices (Nostr)'));
     const ln = h('input', { class: 'aiinp', placeholder: 'you@wallet.com (optional)', 'aria-label': 'Lightning address for the refund', autocomplete: 'off' }) as HTMLInputElement;
     const st = h('p', { class: 'aistate' });
-    const end = h('details', { class: 'gmore' }, h('summary', {}, 'End session and refund'),
-      h('p', { class: 'note' }, 'Leave the address empty to get a Cashu token you can paste into any Cashu wallet.'), ln,
+    const end = h('div', { class: 'airefundin' },
+      h('p', { class: 'note' }, 'Send what is left back to you and end the session. Enter a Lightning address, or leave it empty to get a Cashu token for any Cashu wallet.'), ln,
       h('button', { class: 'btn small', onclick: async () => {
         st.textContent = 'Refunding…';
         try {
@@ -207,8 +262,8 @@ export function createAiUi(h: H, toast: (m: string) => void) {
           if (e?.status === 409) st.textContent = 'A refund is already in progress. Try again in a moment.';
           else st.textContent = `Refund failed: ${e.message}. Your session is kept, so nothing is lost.`;
         }
-      } }, 'End session and refund'), st);
-    body.append(end, privacy());
+      } }, 'Refund and end session'), st);
+    refundBox.append(end); body.append(privacy());
     void refreshCredit().then(() => { if (dlg.open && body.contains(end)) { const b = body.querySelector('.aicredit b'); if (b) b.textContent = fmtSats(credit ?? 0); const sm = body.querySelector('.aicredit small'); if (sm) sm.textContent = fmtUsd(credit ?? 0, usd); } });
   }
 
@@ -229,9 +284,10 @@ export function createAiUi(h: H, toast: (m: string) => void) {
   }
 
   /** Make one picture; asks for credit first if there is none. `use` overrides the model (the flat redraw). */
-  async function create(prompt: string, ref: string | string[] | undefined, aspect: string, onStart: () => void, use?: string): Promise<string | null> {
+  async function create(prompt: string, ref: string | string[] | undefined, aspect: string, onStart: () => void, use?: string, again = false): Promise<string | null> {
+    if (!getSession() && !(await askForCredit())) return null; // pays, then carries straight on
     const s = getSession();
-    if (!s) { open(() => toast('Credit added. Press the button again to create.')); return null; }
+    if (!s) return null;
     let m = use ?? model;
     // the credit lives on one node: if it doesn't offer this model, fall back to one it does
     if (use) {
@@ -249,8 +305,10 @@ export function createAiUi(h: H, toast: (m: string) => void) {
       return url;
     } catch (e: any) {
       void refreshCredit();
-      if (e?.status === 402 || /balance|insufficient/i.test(e?.message ?? '')) { toast('Not enough credit for this picture. Top up to continue.'); open(); }
-      else toast(`The AI could not make it: ${e.message}`);
+      if (e?.status === 402 || /balance|insufficient/i.test(e?.message ?? '')) {
+        toast('Not enough credit for this picture. Top up and it carries on.');
+        if (!again && (await askForCredit(true))) return create(prompt, ref, aspect, onStart, use, true);
+      } else toast(`The AI could not make it: ${e.message}`);
       return null;
     }
   }
@@ -265,8 +323,9 @@ export function createAiUi(h: H, toast: (m: string) => void) {
     return vis?.maxSats ?? null;
   };
   async function check(ref: string, onStart: () => void): Promise<PictureCheck | null> {
+    if (!getSession() && !(await askForCredit())) return null;
     const s = getSession();
-    if (!s) { open(() => toast('Credit added. Press Check again.')); return null; }
+    if (!s) return null;
     await visionCost();
     if (!vis) { toast('This AI node has no picture-reading model right now. Try again later.'); return null; }
     onStart();
@@ -276,7 +335,7 @@ export function createAiUi(h: H, toast: (m: string) => void) {
       return r;
     } catch (e: any) {
       void refreshCredit();
-      if (e?.status === 402 || /balance|insufficient/i.test(e?.message ?? '')) { toast('Not enough credit. Top up to continue.'); open(); }
+      if (e?.status === 402 || /balance|insufficient/i.test(e?.message ?? '')) { toast('Not enough credit. Top up and press Check again.'); open(); }
       else toast(`The AI could not check it: ${e.message}`);
       return null;
     }
