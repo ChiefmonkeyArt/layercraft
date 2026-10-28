@@ -187,6 +187,35 @@ export function savePayment(p: Payment) {
   a.unshift(p); store.set(LS_PAY, JSON.stringify(a.slice(0, 40)));
 }
 
+/** Credit in transit between nodes, kept as the Cashu token until another node has taken it. */
+export interface Carry { token: string; sats: number; from: string; at: number }
+const LS_CARRY = 'lc.ai.carry';
+export function carries(): Carry[] { try { const a = JSON.parse(store.get(LS_CARRY) || '[]'); return Array.isArray(a) ? a : []; } catch { return []; } }
+export function dropCarry(token: string) { saveCarries(carries().filter((x) => x.token !== token)); }
+function saveCarries(a: Carry[]) { store.set(LS_CARRY, JSON.stringify(a.slice(0, 20))); }
+/** Puts a carried token on the first node that offers the model and accepts it. The token stays saved until one does. */
+export async function landCarry(c: Carry, model: string, skip: string[] = []): Promise<Session | null> {
+  let offers: NodeOffer[] = [];
+  try { offers = await findOffers(model); } catch { return null; }
+  for (const o of offers.filter((x) => !skip.includes(x.url))) {
+    try {
+      const key = await redeemCashu(o.url, c.token);
+      saveCarries(carries().filter((x) => x.token !== c.token));
+      return { node: o.url, name: o.name, key, created: Date.now() };
+    } catch { /* mint not trusted there, or node down: next */ }
+  }
+  return null;
+}
+/** Moves all credit off a node that can't make pictures: refund as Cashu, then redeem it on a working node. */
+export async function moveCredit(s: Session, model: string): Promise<Session | null> {
+  const r = await refund(s);
+  if (!r.token) return null;
+  const c: Carry = { token: r.token, sats: Number(r.sats ?? 0), from: s.name, at: Date.now() };
+  saveCarries([c, ...carries()]); // saved before anything else can go wrong
+  setSession(null); // that node's key is empty now; the wallet shows the credit as moving
+  return landCarry(c, model, [s.node]);
+}
+
 export async function redeemCashu(node: string, token: string): Promise<string> {
   const t = token.replace(/\s+/g, '');
   if (!/^cashu[AB]/.test(t)) throw new Error('That does not look like a Cashu token (it starts with cashuA or cashuB)');

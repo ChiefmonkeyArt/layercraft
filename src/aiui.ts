@@ -1,7 +1,7 @@
 // The AI credit sheet: pay with Lightning (QR) or Cashu, see what's left, top up, end and refund.
 import QRCode from 'qrcode';
 import {
-  shortfall, markNode,   FLAT_MODEL, MODELS, newerModels, NodeOffer, Session, balance, btcUsd, createInvoice, findOffers, fmtSats, fmtUsd, generateImage, getSession,
+  shortfall, markNode, moveCredit, landCarry, carries, dropCarry,   FLAT_MODEL, MODELS, newerModels, NodeOffer, Session, balance, btcUsd, createInvoice, findOffers, fmtSats, fmtUsd, generateImage, getSession,
   invoiceStatus, findPayment, payments, savePayment, Payment, parseSessionCode, redeemCashu, refund, sessionCode, setSession, shrinkForUpload, topupCashu,
   checkPicture, visionOffer, type PictureCheck,
 } from './ai';
@@ -345,6 +345,11 @@ export function createAiUi(h: H, toast: (m: string) => void) {
         p.status === 'pending' ? h('button', { class: 'btn small', onclick: async () => { await checkPending(true); viewSessionOrBuy(); } }, 'Check') : null));
     }
     box.append(ul);
+    // credit on its way between nodes: the token itself, in case no node takes it
+    for (const c of carries()) box.append(h('div', { class: 'aiwarn' },
+      h('p', {}, `${fmtSats(c.sats)} from ${c.from} is waiting to move to a working node.`),
+      h('div', { class: 'gbtns' }, h('button', { class: 'btn small', onclick: async () => { await checkPending(true); viewSessionOrBuy(); } }, 'Move it now'),
+        h('button', { class: 'btn small', onclick: () => void viewToken(c.token, String(c.sats)) }, 'Show Cashu token'))));
     return box;
   }
   const viewSessionOrBuy = () => { if (getSession()) viewSession(); else void viewBuy(); };
@@ -364,6 +369,12 @@ export function createAiUi(h: H, toast: (m: string) => void) {
         const ss: Session = { node: p.node, name: p.name, key: p.key!, created: p.at };
         try { const b = await balance(ss); if (b.sats > 0) { setSession(ss); await refreshCredit(); toast(`Your payment arrived: ${fmtSats(b.sats)} credit`); got = true; break; } } catch { /* ended */ }
       }
+    }
+    for (const c of carries()) {
+      const cur = getSession();
+      if (cur) { try { await topupCashu(cur, c.token); dropCarry(c.token); await refreshCredit(); toast(`${fmtSats(c.sats)} moved credit added`); got = true; } catch { /* kept: shown in the wallet */ } continue; }
+      const ss = await landCarry(c, model);
+      if (ss) { setSession(ss); await refreshCredit(); toast(`Your credit is ready on ${ss.name}`); got = true; }
     }
     if (say && !got) toast('Nothing new yet');
   }
@@ -386,9 +397,11 @@ export function createAiUi(h: H, toast: (m: string) => void) {
 
   /** Make one picture; asks for credit first if there is none. `use` overrides the model (the flat redraw). */
   /** Why the last create gave no picture, in plain words (null when it worked or was stopped). */
-  let problem: string | null = null;
-  async function create(prompt: string, ref: string | string[] | undefined, aspect: string, onStart: () => void, use?: string, again = false, stop?: AbortSignal): Promise<string | null> {
-    problem = null;
+  let problem: string | null = null, lastDetail = '';
+  const moves: string[] = [];
+  async function create(prompt: string, ref: string | string[] | undefined, aspect: string, onStart: (note?: string) => void, use?: string, again = false, stop?: AbortSignal, quiet = false): Promise<string | null> {
+    problem = null; if (!again) { moves.length = 0; lastDetail = ''; }
+    if (!getSession() && carries().length) await checkPending(); // credit moved earlier but not landed yet
     if (!getSession() && !(await askForCredit())) return null; // pays, then carries straight on
     const s = getSession();
     if (!s || stop?.aborted) return null;
@@ -422,14 +435,30 @@ export function createAiUi(h: H, toast: (m: string) => void) {
         problem = `${s.name} is still holding ${fmtSats(held)} for an earlier picture that has not finished. It lets go when that one ends, usually within a few minutes. Your credit is safe: try again shortly, or refund it from the wallet.`;
       } else if (lowCredit) {
         toast(`This picture needs up to ${fmtSats(need)} and ${fmtSats(Math.max(0, have!))} is free. Top up and it carries on.`);
-        if (!again && !stop?.aborted && (await askForCredit(true))) return create(prompt, ref, aspect, onStart, use, true, stop);
+        if (!again && !stop?.aborted && (await askForCredit(true))) return create(prompt, ref, aspect, onStart, use, true, stop, quiet);
         problem = 'Not enough credit for this picture yet.';
       } else {
         // the node or its AI provider failed; the user's credit is not the issue
         markNode(s.node, false);
-        problem = `${s.name} could not make the picture${e?.status ? ` (it answered ${e.status})` : ''}: “${said.slice(0, 160)}”. Your ${credit != null ? fmtSats(credit) + ' ' : ''}credit is safe. Try again, or refund it from the wallet and pay a different node.`;
+        console.warn(`[layercraft] ${s.name} failed:`, e?.status, said);
+        lastDetail = `${s.name}${e?.status ? ` (${e.status})` : ''}: ${said.slice(0, 300)}`;
+        if (!again && !stop?.aborted) {
+          // just works: take the credit to a node that can draw, and carry on
+          onStart('Switching to another AI node…');
+          try {
+            const moved = await moveCredit(s, m);
+            if (moved) {
+              setSession(moved); await refreshCredit();
+              moves.push(`${s.name} couldn’t draw just now, so your credit moved to ${moved.name}.`);
+              onStart();
+              return create(prompt, ref, aspect, onStart, use, true, stop, quiet);
+            }
+          } catch (x) { console.warn('[layercraft] move failed', x); }
+          void refreshCredit();
+        }
+        problem = 'The AI couldn’t draw this just now. Your credit is safe in the wallet. Please try again in a minute.';
       }
-      toast(problem);
+      if (!quiet) toast(problem);
       return null;
     }
   }
@@ -477,6 +506,6 @@ export function createAiUi(h: H, toast: (m: string) => void) {
   // payments that were made but never reached a saved session come back on their own
   setTimeout(() => void checkPending(), 1500);
   void btcUsd().then((v) => { usd = v; });
-  return { badge, open, create, problem: () => problem, check, visionCost, refreshCredit, credit: () => credit, usd: () => usd, hasSession: () => !!getSession(), onChange: (f: () => void) => listeners.add(f), modelLabel, maxCost, flat };
+  return { badge, open, create, problem: () => problem, detail: () => lastDetail, moved: () => moves.splice(0), check, visionCost, refreshCredit, credit: () => credit, usd: () => usd, hasSession: () => !!getSession(), onChange: (f: () => void) => listeners.add(f), modelLabel, maxCost, flat };
 }
 export type AiUi = ReturnType<typeof createAiUi>;

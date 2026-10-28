@@ -10,7 +10,7 @@ import { nearestAspect } from './aiui';
 import { hexRgb as hexToRgb } from './trace';
 
 export interface Shot { src: string; plan: string[]; report: CutReport; w: number; h: number }
-export interface Msg { you: boolean; text: string; img?: string; imgs?: string[]; shot?: number }
+export interface Msg { you: boolean; text: string; detail?: string; img?: string; imgs?: string[]; shot?: number }
 export interface Part { chat: Msg[]; shots: Shot[]; pick: number; layers: number; ramp: string; mine: boolean; colours: string; draft: string }
 export interface Art { v: 1; hero: Part; pop: Part; place: PopPlace[]; noPop?: boolean; name?: string; frame?: boolean }
 export type Which = 'hero' | 'pop';
@@ -118,14 +118,16 @@ export function createStudio(x: StudioCtx) {
     const msg = which === 'hero' ? (cur ? 'Changing your Hero…' : 'Drawing your Hero…') : (cur ? 'Changing the Pop…' : 'Drawing the Pop…');
     const stop = () => { ac.abort(); x.busy(''); api.toast('Stopped. Change your words and press Create again.'); x.draw(); };
     let url: string | null = null;
-    try { url = await api.ai.create(prompt, refs.length ? refs : undefined, aspect, () => x.busy(msg, { stop, colours: plan }), undefined, false, ac.signal); }
+    try { url = await api.ai.create(prompt, refs.length ? refs : undefined, aspect, (note) => x.busy(note ?? msg, { stop, colours: plan }), undefined, false, ac.signal); }
     finally { making = null; }
     if (ac.signal.aborted) return;
     if (!url) { // no credit, or the node failed: say why in the chat; the words stay in the box
       const why = api.ai.problem();
-      if (why) { p.chat.push({ you: false, text: why }); save(); }
+      for (const n of api.ai.moved()) p.chat.push({ you: false, text: n });
+      if (why) { p.chat.push({ you: false, text: why, detail: api.ai.detail() || undefined }); save(); }
       x.busy(''); x.draw(); return;
     }
+    const notes = api.ai.moved();
     if (which === 'hero' && !art.hero.shots.length) {
       // a new piece: its own project, named from the first words
       api.projects.startNew();
@@ -134,6 +136,7 @@ export function createStudio(x: StudioCtx) {
     }
     const imgs = await Promise.all(ref.map((r) => shrink(r, 240, 'image/jpeg')));
     p.chat.push({ you: true, text: text.trim(), img: imgs[0], imgs: imgs.length > 1 ? imgs : undefined });
+    for (const n of notes) p.chat.push({ you: false, text: n });
     p.draft = ''; attach[which] = [];
     await addShot(which, url, plan);
   }
@@ -197,6 +200,7 @@ export function createStudio(x: StudioCtx) {
           onclick: async () => { if (on) return; p.pick = m.shot!; save(); x.busy('Building the stack…'); await rebuild(); x.busy(''); x.draw(); } },
           h('img', { src: s.src, alt: `${which === 'hero' ? 'Hero' : 'Pop'} drawing ${i}` }), on ? h('span', { class: 'gbadge' }, 'In use') : h('span', { class: 'gbadge ghost' }, 'Use this')) : null,
         h('p', {}, m.text),
+        m.detail ? h('details', { class: 'gdetail' }, h('summary', {}, 'Details'), h('small', {}, m.detail)) : null,
         on && s && !s.report.ready ? x.aiButton('Ask the AI to fix it', () => fix(which), undefined, 'small') : null));
     });
     const ta = h('textarea', { rows: 3, maxlength: 1200, 'aria-label': which === 'hero' ? 'Describe your Hero' : 'Describe your Pop',
