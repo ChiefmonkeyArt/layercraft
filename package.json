@@ -1,6 +1,6 @@
 {
   "name": "layercraft",
-  "version": "1.0.1",
+  "version": "0.1.1",
   "main": "index.js",
   "scripts": {
     "test": "tsx tests/run.ts",
